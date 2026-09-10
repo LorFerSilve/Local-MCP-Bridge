@@ -26,6 +26,24 @@ Example capability classes:
 
 A missing permission means denied.
 
+## Phase 2 project registry guarantees
+
+The project registry is the first active authorization boundary. It maps AI-visible logical project IDs to local canonical filesystem roots while keeping those roots server-side.
+
+Before a project is accepted into the registry:
+
+1. the project ID must match the restricted lowercase ID grammar;
+2. the configured root must be an absolute path;
+3. the root must exist and resolve successfully;
+4. the resolved root must be a directory;
+5. the same canonical root may not be registered twice;
+6. duplicate YAML mapping keys are rejected;
+7. unknown project and permission keys are rejected;
+8. permissions default to denied;
+9. search permission may not be enabled without read permission.
+
+MCP metadata tools may expose project IDs and capability flags, but must not expose canonical roots. If no default local configuration exists, the runtime registry is empty. If a configuration path is explicitly selected and cannot be loaded, startup fails closed rather than silently granting access.
+
 ## Filesystem confinement
 
 Every requested path must be interpreted relative to a registered project root unless a future API explicitly states otherwise.
@@ -40,6 +58,8 @@ Before access:
 6. only then perform I/O.
 
 String-prefix checks such as `candidate.startswith(root)` are insufficient and must not be used as the sole confinement check.
+
+Phase 2 registers canonical roots but does not yet expose filesystem-content tools. Path-level confinement for requested child paths is implemented in a later dedicated phase before read tools are considered production-safe.
 
 ## Process execution
 
