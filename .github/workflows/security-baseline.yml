@@ -1,0 +1,41 @@
+name: Security baseline
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  repository-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Reject sensitive tracked paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pattern='(^|/)(\.env|config/config\.yaml|config/config\.local\.yaml|credentials/|secrets/|tokens/|certs/|runtime/|jobs/|logs/|output/|outputs/|artifacts/|ngrok\.yml)'
+          matches="$(git ls-files | grep -E "$pattern" || true)"
+
+          if [[ -n "$matches" ]]; then
+            echo "Sensitive/local-only paths are tracked by Git:"
+            echo "$matches"
+            exit 1
+          fi
+
+      - name: Reject obvious private keys
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git grep -I -n -E -- '-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----' -- .; then
+            echo "Private-key material appears to be committed. Remove it and rotate the key."
+            exit 1
+          fi
+
+          echo "No obvious private-key material found."
