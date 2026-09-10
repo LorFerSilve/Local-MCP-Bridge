@@ -36,7 +36,7 @@ projects:
 # - Project IDs are lowercase, start with a letter, and may contain digits/hyphens.
 # - Project roots must be absolute, existing directories.
 # - Roots are canonicalized before registration.
-# - The same canonical root cannot be registered under multiple project IDs.
+# - Registered roots may not be identical or nested inside one another.
 # - Duplicate YAML keys are rejected instead of silently overwritten.
 # - Permissions default to false when omitted.
 # - search=true requires read=true.
