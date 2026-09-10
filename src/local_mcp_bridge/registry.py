@@ -75,7 +75,7 @@ def _roots_overlap(first: str, second: str) -> bool:
         common = os.path.commonpath((first, second))
     except ValueError:
         return False
-    return common == first or common == second
+    return common in (first, second)
 
 
 class ProjectRegistry:
