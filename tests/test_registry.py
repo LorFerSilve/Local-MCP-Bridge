@@ -13,13 +13,14 @@ def _write_config(tmp_path: Path, content: str) -> Path:
     return path
 
 
-def _project_yaml(root: Path, *, permissions: str = "read: true\n      search: true") -> str:
+def _project_yaml(root: Path, *, permissions: str = "read: true\nsearch: true") -> str:
+    indented_permissions = permissions.replace("\n", "\n      ")
     return f"""
 projects:
   demo:
     root: {root.as_posix()!r}
     permissions:
-      {permissions.replace(chr(10), chr(10) + '      ')}
+      {indented_permissions}
 """
 
 
