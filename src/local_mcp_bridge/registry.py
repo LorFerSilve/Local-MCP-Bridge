@@ -12,7 +12,8 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
+
+from typing_extensions import TypedDict
 
 PROJECT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
