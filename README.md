@@ -141,18 +141,18 @@ Never place real API keys, authentication tokens, tunnel credentials, private ce
 
 ## Planned development phases
 
-1. Repository and security baseline
-2. Minimal MCP server
-3. Project registry and allowed roots
-4. Safe filesystem tools
-5. Path/symlink/junction confinement
-6. Controlled process execution
-7. Persistent local job manager
-8. Git synchronization tools
-9. Audit logging and runtime hardening
-10. Remote/tunnel integration
-11. Lightweight Claude MCP validation
-12. Real project integration and autonomous workflow testing
+- **Phase 0:** Repository and security baseline
+- **Phase 1:** Minimal MCP server
+- **Phase 2:** Project registry and allowed roots
+- **Phase 3:** Safe filesystem tools
+- **Phase 4:** Path/symlink/junction confinement
+- **Phase 5:** Controlled process execution
+- **Phase 6:** Persistent local job manager
+- **Phase 7:** Git synchronization tools
+- **Phase 8:** Audit logging and runtime hardening
+- **Phase 9:** Remote/tunnel integration
+- **Phase 10:** Lightweight Claude MCP validation
+- **Phase 11:** Real project integration and autonomous workflow testing
 
 ## Current status
 
