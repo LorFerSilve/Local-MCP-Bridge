@@ -41,21 +41,74 @@ See [`docs/security-model.md`](docs/security-model.md) and [`docs/threat-model.m
 ```text
 Local-MCP-Bridge/
 ├── .github/
-│   └── dependabot.yml
+│   ├── dependabot.yml
+│   └── workflows/
+│       ├── ci.yml
+│       └── security-baseline.yml
 ├── config/
 │   └── config.example.yaml
 ├── docs/
 │   ├── architecture.md
 │   ├── security-model.md
 │   └── threat-model.md
+├── src/
+│   └── local_mcp_bridge/
+│       ├── __init__.py
+│       ├── __main__.py
+│       └── server.py
+├── tests/
+│   └── test_server.py
 ├── .env.example
 ├── .gitignore
 ├── LICENSE
+├── pyproject.toml
 ├── README.md
 └── SECURITY.md
 ```
 
-Implementation code will be added under `src/` with tests under `tests/` as the project progresses.
+## Phase 1: minimal MCP server
+
+Phase 1 establishes a real, installable MCP server while deliberately exposing no privileged host capabilities yet.
+
+The server currently exposes exactly one tool:
+
+- `health_check` — returns non-sensitive server/version information and confirms that filesystem and execution capabilities are disabled.
+
+The bridge uses the MCP Python SDK v2 and defaults to MCP's `stdio` transport for local development.
+
+### Local setup
+
+From the repository root on Python 3.11 or newer:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+Run the tests and linter:
+
+```powershell
+python -m ruff check .
+python -m pytest -q
+```
+
+Start the server over stdio:
+
+```powershell
+python -m local_mcp_bridge
+```
+
+The process will wait for an MCP host on stdin/stdout; that is expected for the stdio transport.
+
+For interactive development with the MCP Inspector:
+
+```powershell
+mcp dev src/local_mcp_bridge/server.py
+```
+
+No project directories, shell access, subprocess execution, Git operations, network credentials, or host metadata are exposed in Phase 1.
 
 ## Configuration policy
 
@@ -103,9 +156,9 @@ Never place real API keys, authentication tokens, tunnel credentials, private ce
 
 ## Current status
 
-**Phase 0 — security and repository bootstrap.**
+**Phase 1 — minimal MCP server implemented.**
 
-No local execution capability is exposed yet.
+Filesystem access and local command execution remain intentionally disabled until their dedicated security layers are implemented and tested.
 
 ## Contributing
 
