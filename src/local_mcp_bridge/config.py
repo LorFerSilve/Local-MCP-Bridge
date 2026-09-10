@@ -115,7 +115,8 @@ def _resolve_project_root(raw: object, project_id: str) -> Path:
     try:
         resolved = root.resolve(strict=True)
     except OSError as exc:
-        raise ConfigError(f"Project {project_id!r} root does not exist or cannot be resolved.") from exc
+        message = f"Project {project_id!r} root does not exist or cannot be resolved."
+        raise ConfigError(message) from exc
 
     if not resolved.is_dir():
         raise ConfigError(f"Project {project_id!r} root must reference a directory.")
