@@ -142,7 +142,26 @@ projects:
 """,
     )
 
-    with pytest.raises(ConfigError, match="same root"):
+    with pytest.raises(ConfigError, match="overlap"):
+        load_project_registry(config)
+
+
+def test_nested_project_roots_are_rejected(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    config = _write_config(
+        tmp_path,
+        f"""
+projects:
+  parent:
+    root: {parent.as_posix()!r}
+  child:
+    root: {child.as_posix()!r}
+""",
+    )
+
+    with pytest.raises(ConfigError, match="overlap"):
         load_project_registry(config)
 
 
