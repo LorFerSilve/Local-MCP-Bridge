@@ -68,12 +68,21 @@ class ProjectRecord:
         return PublicProject(id=self.project_id, permissions=self.permissions.as_public())
 
 
+def _roots_overlap(first: str, second: str) -> bool:
+    """Return whether either normalized root contains the other."""
+    try:
+        common = os.path.commonpath((first, second))
+    except ValueError:
+        return False
+    return common == first or common == second
+
+
 class ProjectRegistry:
     """Immutable lookup boundary for explicitly authorized project roots."""
 
     def __init__(self, projects: Iterable[ProjectRecord] = ()) -> None:
         by_id: dict[str, ProjectRecord] = {}
-        roots: set[str] = set()
+        roots: list[str] = []
 
         for project in projects:
             if not PROJECT_ID_PATTERN.fullmatch(project.project_id):
@@ -85,11 +94,13 @@ class ProjectRegistry:
                 raise RegistryError(f"Duplicate project ID: {project.project_id}")
 
             root_key = os.path.normcase(str(project.root))
-            if root_key in roots:
-                raise RegistryError("Multiple project IDs may not reference the same root.")
+            if any(_roots_overlap(root_key, existing) for existing in roots):
+                raise RegistryError(
+                    "Project roots may not be identical, nested, or otherwise overlap."
+                )
 
             by_id[project.project_id] = project
-            roots.add(root_key)
+            roots.append(root_key)
 
         self._projects = by_id
 
