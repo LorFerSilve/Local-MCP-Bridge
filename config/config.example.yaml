@@ -1,0 +1,36 @@
+# Example configuration only. Copy to config/config.yaml for local use.
+# The real config is ignored by Git.
+
+server:
+  host: "127.0.0.1"
+  port: 8000
+
+security:
+  deny_by_default: true
+  max_read_bytes: 1048576
+  max_output_bytes: 1048576
+  default_command_timeout_seconds: 300
+  allow_arbitrary_shell: false
+
+projects:
+  example-project:
+    root: "C:/path/to/your/project"
+    permissions:
+      read: true
+      search: true
+      execute: false
+      git: false
+    allowed_executables:
+      - python
+      - git
+      - pytest
+    execution:
+      max_concurrent_jobs: 1
+      default_timeout_seconds: 300
+
+# Planned policy:
+# - Every filesystem path is resolved relative to a configured project root.
+# - Canonicalized paths must remain inside that root.
+# - Symlink/junction/reparse-point escapes are rejected.
+# - Executables are allowlisted per project.
+# - Shell command strings are disabled by default.

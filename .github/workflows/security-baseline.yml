@@ -1,0 +1,44 @@
+name: Security baseline
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  repository-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1, pinned to an immutable commit SHA.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Reject sensitive tracked paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pattern='(^|/)(\.env$|\.env\.(?!example$)|config/config\.yaml$|config/config\.local\.yaml$|credentials/|secrets/|tokens/|certs/|runtime/|jobs/|logs/|output/|outputs/|artifacts/|ngrok\.yml$)'
+
+          # grep -P is used because the .env rule intentionally allows .env.example.
+          matches="$(git ls-files | grep -P "$pattern" || true)"
+
+          if [[ -n "$matches" ]]; then
+            echo "Sensitive/local-only paths are tracked by Git:"
+            echo "$matches"
+            exit 1
+          fi
+
+      - name: Reject obvious private keys
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git grep -I -n -E -- '-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----' -- .; then
+            echo "Private-key material appears to be committed. Remove it and rotate the key."
+            exit 1
+          fi
+
+          echo "No obvious private-key material found."
