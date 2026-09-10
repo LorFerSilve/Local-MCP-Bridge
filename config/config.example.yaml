@@ -1,5 +1,5 @@
 # Example configuration only. Copy to config/config.yaml for local use.
-# The real config is ignored by Git.
+# The real config is ignored by Git and must never be committed.
 
 server:
   host: "127.0.0.1"
@@ -14,12 +14,16 @@ security:
 
 projects:
   example-project:
+    # Must be an existing absolute directory. The canonicalized root remains
+    # internal to the bridge and is never returned by MCP metadata tools.
     root: "C:/path/to/your/project"
     permissions:
       read: true
       search: true
       execute: false
       git: false
+
+    # Reserved for later execution phases. These values are not active in Phase 2.
     allowed_executables:
       - python
       - git
@@ -28,9 +32,14 @@ projects:
       max_concurrent_jobs: 1
       default_timeout_seconds: 300
 
-# Planned policy:
-# - Every filesystem path is resolved relative to a configured project root.
-# - Canonicalized paths must remain inside that root.
-# - Symlink/junction/reparse-point escapes are rejected.
-# - Executables are allowlisted per project.
-# - Shell command strings are disabled by default.
+# Phase 2 policy:
+# - Project IDs are lowercase, start with a letter, and may contain digits/hyphens.
+# - Project roots must be absolute, existing directories.
+# - Roots are canonicalized before registration.
+# - Registered roots may not be identical or nested inside one another.
+# - Duplicate YAML keys are rejected instead of silently overwritten.
+# - Permissions default to false when omitted.
+# - search=true requires read=true.
+# - MCP metadata exposes IDs and capability flags, never local absolute roots.
+# - If config/config.yaml is absent, the bridge starts with zero authorized projects.
+# - Filesystem content access and command execution remain disabled until later phases.

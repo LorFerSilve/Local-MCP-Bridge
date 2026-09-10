@@ -55,8 +55,11 @@ Local-MCP-Bridge/
 │   └── local_mcp_bridge/
 │       ├── __init__.py
 │       ├── __main__.py
+│       ├── config.py
+│       ├── registry.py
 │       └── server.py
 ├── tests/
+│   ├── test_registry.py
 │   └── test_server.py
 ├── .env.example
 ├── .gitignore
@@ -66,17 +69,7 @@ Local-MCP-Bridge/
 └── SECURITY.md
 ```
 
-## Phase 1: minimal MCP server
-
-Phase 1 establishes a real, installable MCP server while deliberately exposing no privileged host capabilities yet.
-
-The server currently exposes exactly one tool:
-
-- `health_check` — returns non-sensitive server/version information and confirms that filesystem and execution capabilities are disabled.
-
-The bridge uses the MCP Python SDK v2 and defaults to MCP's `stdio` transport for local development.
-
-### Local setup
+## Local setup
 
 From the repository root on Python 3.11 or newer:
 
@@ -87,20 +80,18 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-Run the tests and linter:
+Run the linter and tests:
 
 ```powershell
 python -m ruff check .
 python -m pytest -q
 ```
 
-Start the server over stdio:
+Start the MCP server over stdio:
 
 ```powershell
 python -m local_mcp_bridge
 ```
-
-The process will wait for an MCP host on stdin/stdout; that is expected for the stdio transport.
 
 For interactive development with the MCP Inspector:
 
@@ -108,7 +99,65 @@ For interactive development with the MCP Inspector:
 mcp dev src/local_mcp_bridge/server.py
 ```
 
-No project directories, shell access, subprocess execution, Git operations, network credentials, or host metadata are exposed in Phase 1.
+## Phase 2: project registry and allowed roots
+
+Phase 2 introduces the local project registry that separates MCP-facing project identifiers from host-specific absolute paths.
+
+The server exposes three non-destructive metadata tools:
+
+- `health_check` — returns server/version status and the number of configured projects;
+- `list_projects` — returns configured project IDs and their capability flags;
+- `get_project` — returns public metadata for one project ID.
+
+Absolute local roots are never included in MCP responses.
+
+### Configure a local project
+
+Copy the tracked example configuration to the ignored local configuration file:
+
+```powershell
+Copy-Item config/config.example.yaml config/config.yaml
+```
+
+Then edit `config/config.yaml`, for example:
+
+```yaml
+projects:
+  aurum:
+    root: "C:/path/to/aurum-forecasting-tool"
+    permissions:
+      read: true
+      search: true
+      execute: false
+      git: false
+```
+
+The root must already exist and must be an absolute directory path.
+
+You may also select a different local config file with:
+
+```powershell
+$env:LOCAL_MCP_BRIDGE_CONFIG = "C:/path/to/local-config.yaml"
+python -m local_mcp_bridge
+```
+
+If no `config/config.yaml` exists and no override is supplied, the bridge starts safely with **zero authorized projects**.
+
+### Registry invariants
+
+Phase 2 enforces the following before a root enters the registry:
+
+- project IDs must start with a lowercase letter and contain only lowercase letters, digits, and hyphens;
+- roots must be absolute, existing directories;
+- roots are canonicalized with strict resolution;
+- duplicate YAML keys are rejected;
+- the same canonical root cannot be registered under multiple IDs;
+- permissions default to `false` when omitted;
+- `search: true` requires `read: true`;
+- unknown project and permission keys are rejected;
+- MCP-visible metadata never contains the local absolute root.
+
+Filesystem content access and command execution remain intentionally disabled in Phase 2.
 
 ## Configuration policy
 
@@ -156,9 +205,9 @@ Never place real API keys, authentication tokens, tunnel credentials, private ce
 
 ## Current status
 
-**Phase 1 — minimal MCP server implemented.**
+**Phase 2 — project registry and allowed roots implemented.**
 
-Filesystem access and local command execution remain intentionally disabled until their dedicated security layers are implemented and tested.
+The bridge can now load and expose safe project metadata, but it still cannot read project files or execute local commands. Those capabilities remain gated behind later security phases.
 
 ## Contributing
 

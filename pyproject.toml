@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-mcp-bridge"
-version = "0.1.0"
+version = "0.2.0"
 description = "A security-scoped MCP bridge for controlled local development access."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,6 +20,8 @@ classifiers = [
 ]
 dependencies = [
     "mcp[cli]>=2.0,<3",
+    "PyYAML>=6,<7",
+    "typing-extensions>=4.13,<5",
 ]
 
 [project.optional-dependencies]
