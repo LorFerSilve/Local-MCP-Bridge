@@ -1,8 +1,7 @@
 """MCP server entry point for Local-MCP-Bridge."""
 
-from typing import TypedDict
-
 from mcp.server import MCPServer
+from typing_extensions import TypedDict
 
 from local_mcp_bridge import __version__
 from local_mcp_bridge.config import load_runtime_registry
