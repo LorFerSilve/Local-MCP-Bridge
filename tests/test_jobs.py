@@ -213,7 +213,7 @@ def test_nonterminal_state_is_marked_interrupted_during_recovery(tmp_path: Path)
     assert recovered.get_job_output(job_id)["data"] == "partial"
 
 
-def test_malformed_or_oversized_state_does_not_break_recovery(tmp_path: Path) -> None:
+def test_malformed_state_does_not_break_recovery(tmp_path: Path) -> None:
     state_dir = tmp_path / "job-state"
     state_dir.mkdir()
     project = tmp_path / "project"
@@ -222,6 +222,21 @@ def test_malformed_or_oversized_state_does_not_break_recovery(tmp_path: Path) ->
 
     recovered = _manager(project, state_dir)
     assert recovered.list_jobs() == {"jobs": []}
+
+
+def test_redirecting_state_directory_is_rejected(tmp_path: Path) -> None:
+    real_state = tmp_path / "real-state"
+    real_state.mkdir()
+    linked_state = tmp_path / "linked-state"
+    try:
+        linked_state.symlink_to(real_state, target_is_directory=True)
+    except OSError:
+        pytest.skip("Symbolic links are unavailable in this environment.")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    with pytest.raises(JobError, match="redirecting link|reparse"):
+        _manager(project, linked_state)
 
 
 def test_start_validation_rejects_unknown_executable_before_allocating_job(tmp_path: Path) -> None:
