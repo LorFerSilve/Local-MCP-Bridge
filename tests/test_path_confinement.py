@@ -97,7 +97,9 @@ def test_file_replacement_between_authorization_and_open_is_detected(
         guard.read_bounded(relative, 1024)
 
 
-def test_symlink_inside_project_is_denied_even_when_target_stays_inside_root(tmp_path: Path) -> None:
+def test_symlink_inside_project_is_denied_even_when_target_stays_inside_root(
+    tmp_path: Path,
+) -> None:
     target = tmp_path / "target.txt"
     target.write_text("safe-but-linked", encoding="utf-8")
     link = tmp_path / "link.txt"
