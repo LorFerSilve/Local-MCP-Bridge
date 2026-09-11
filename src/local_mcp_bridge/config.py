@@ -179,7 +179,8 @@ def _parse_pinned_executable(alias: str, raw_path: object, project_id: str) -> E
         unresolved_metadata = os.lstat(path)
         if is_redirecting_metadata(unresolved_metadata):
             raise ConfigError(
-                f"Pinned executable {alias!r} for project {project_id!r} may not be a link/reparse path."
+                f"Pinned executable {alias!r} for project {project_id!r} "
+                "may not be a link/reparse path."
             )
         resolved = path.resolve(strict=True)
         metadata = os.lstat(resolved)
