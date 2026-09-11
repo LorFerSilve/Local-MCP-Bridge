@@ -671,7 +671,10 @@ class JobManager:
             payload = json.loads(raw.decode("utf-8"))
         except (PathConfinementError, UnicodeError, json.JSONDecodeError):
             return None
-        if not isinstance(payload, dict) or payload.get("schema_version") != JOB_SCHEMA_VERSION:
+        if not isinstance(payload, dict):
+            return None
+        schema_version = payload.get("schema_version")
+        if type(schema_version) is not int or schema_version != JOB_SCHEMA_VERSION:
             return None
 
         try:
@@ -706,7 +709,7 @@ class JobManager:
             return None
         cwd = "." if normalized_cwd.parts == (".",) else normalized_cwd.as_posix()
 
-        if status not in _ACTIVE_STATUSES | _TERMINAL_STATUSES:
+        if not isinstance(status, str) or status not in _ACTIVE_STATUSES | _TERMINAL_STATUSES:
             return None
         if not _is_runtime_timestamp(created_at):
             return None
@@ -725,8 +728,12 @@ class JobManager:
             return None
 
         termination_reason = payload.get("termination_reason")
-        if termination_reason is not None and termination_reason not in _TERMINATION_REASONS:
-            return None
+        if termination_reason is not None:
+            if (
+                not isinstance(termination_reason, str)
+                or termination_reason not in _TERMINATION_REASONS
+            ):
+                return None
         exit_code = payload.get("exit_code")
         if exit_code is not None and type(exit_code) is not int:
             return None
