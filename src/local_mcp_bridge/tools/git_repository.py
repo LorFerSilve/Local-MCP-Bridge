@@ -25,7 +25,6 @@ _DANGEROUS_PREFIXES = (
 _DANGEROUS_EXACT = {
     "core.alternaterefscommand",
     "core.attributesfile",
-    "core.bare",
     "core.excludesfile",
     "core.fsmonitor",
     "core.gitproxy",
