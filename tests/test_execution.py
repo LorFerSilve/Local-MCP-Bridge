@@ -279,3 +279,30 @@ def test_shell_executable_target_is_rejected_even_if_allowlisted(tmp_path: Path)
             await service.run_process("demo", "shell", ["-c", "echo unsafe"])
 
     asyncio.run(scenario())
+
+
+def test_shell_script_target_is_rejected_before_launch(tmp_path: Path) -> None:
+    script = tmp_path / "danger.cmd"
+    script.write_text("echo SHOULD_NOT_RUN\n", encoding="utf-8")
+    if os.name != "nt":
+        script.chmod(0o755)
+
+    registry = ProjectRegistry(
+        [
+            ProjectRecord(
+                project_id="demo",
+                root=tmp_path.resolve(strict=True),
+                permissions=ProjectPermissions(execute=True),
+                allowed_executables=(
+                    ExecutableRule(alias="danger", executable=str(script), pinned=True),
+                ),
+            )
+        ]
+    )
+    service = ExecutionService(registry)
+
+    async def scenario() -> None:
+        with pytest.raises(ExecutionError, match="shell scripts"):
+            await service.run_process("demo", "danger", [])
+
+    asyncio.run(scenario())
