@@ -49,6 +49,27 @@ def _manager(root: Path, state_dir: Path | None = None) -> JobManager:
     return JobManager(registry, ExecutionService(registry), state_dir=state_dir)
 
 
+def _state_payload(job_id: str, *, stdout: str = "partial", status: str = "running") -> dict:
+    return {
+        "schema_version": 1,
+        "job_id": job_id,
+        "project_id": "demo",
+        "executable": "python",
+        "cwd": ".",
+        "status": status,
+        "created_at": "2026-09-11T00:00:00.000Z",
+        "started_at": "2026-09-11T00:00:01.000Z",
+        "finished_at": None if status in {"starting", "running", "cancelling"} else "2026-09-11T00:00:02.000Z",
+        "exit_code": None,
+        "termination_reason": None,
+        "output_truncated": False,
+        "argument_count": 1,
+        "stdout": stdout,
+        "stderr": "",
+        "error": None,
+    }
+
+
 async def _wait_terminal(manager: JobManager, job_id: str, timeout: float = 8.0) -> dict:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -82,6 +103,36 @@ def test_background_job_returns_id_and_completes_without_blocking_start(tmp_path
         assert output["data"].strip() == "done"
         assert output["complete"] is True
         assert output["eof"] is True
+
+    asyncio.run(scenario())
+
+
+def test_nonzero_exit_becomes_failed_terminal_job(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+
+    async def scenario() -> None:
+        started = await manager.start_job("demo", "python", ["-c", "raise SystemExit(7)"])
+        terminal = await _wait_terminal(manager, started["job"]["job_id"])
+        assert terminal["status"] == "failed"
+        assert terminal["exit_code"] == 7
+        assert terminal["termination_reason"] == "exited"
+
+    asyncio.run(scenario())
+
+
+def test_output_limit_becomes_distinct_terminal_job_state(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+
+    async def scenario() -> None:
+        started = await manager.start_job(
+            "demo",
+            "python",
+            ["-c", "import sys; sys.stdout.write('x' * 300000); sys.stdout.flush()"],
+        )
+        terminal = await _wait_terminal(manager, started["job"]["job_id"])
+        assert terminal["status"] == "output_limit"
+        assert terminal["termination_reason"] == "output_limit"
+        assert terminal["output_truncated"] is True
 
     asyncio.run(scenario())
 
@@ -185,24 +236,7 @@ def test_nonterminal_state_is_marked_interrupted_during_recovery(tmp_path: Path)
     project = tmp_path / "project"
     project.mkdir()
     job_id = "a" * 32
-    payload = {
-        "schema_version": 1,
-        "job_id": job_id,
-        "project_id": "demo",
-        "executable": "python",
-        "cwd": ".",
-        "status": "running",
-        "created_at": "2026-09-11T00:00:00.000Z",
-        "started_at": "2026-09-11T00:00:01.000Z",
-        "finished_at": None,
-        "exit_code": None,
-        "termination_reason": None,
-        "output_truncated": False,
-        "argument_count": 1,
-        "stdout": "partial",
-        "stderr": "",
-        "error": None,
-    }
+    payload = _state_payload(job_id)
     (state_dir / f"{job_id}.job.json").write_text(json.dumps(payload), encoding="utf-8")
 
     recovered = _manager(project, state_dir)
@@ -211,6 +245,40 @@ def test_nonterminal_state_is_marked_interrupted_during_recovery(tmp_path: Path)
     assert job["termination_reason"] == "bridge_restart"
     assert job["finished_at"] is not None
     assert recovered.get_job_output(job_id)["data"] == "partial"
+
+
+def test_recovered_state_is_resanitized_and_root_redacted(tmp_path: Path) -> None:
+    state_dir = tmp_path / "job-state"
+    state_dir.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    job_id = "d" * 32
+    raw_output = f"\x1b[31m{project.resolve()}\x1b[0m"
+    payload = _state_payload(job_id, stdout=raw_output, status="succeeded")
+    payload["exit_code"] = 0
+    payload["termination_reason"] = "exited"
+    (state_dir / f"{job_id}.job.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    recovered = _manager(project, state_dir)
+    output = recovered.get_job_output(job_id)["data"]
+    assert "\x1b" not in output
+    assert "\\x1b" in output
+    assert str(project.resolve()) not in output
+    assert "<project-root>" in output
+
+
+def test_recovery_discards_jobs_for_projects_no_longer_authorized(tmp_path: Path) -> None:
+    state_dir = tmp_path / "job-state"
+    state_dir.mkdir()
+    job_id = "e" * 32
+    payload = _state_payload(job_id, status="succeeded")
+    payload["exit_code"] = 0
+    payload["termination_reason"] = "exited"
+    (state_dir / f"{job_id}.job.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    registry = ProjectRegistry.empty()
+    recovered = JobManager(registry, ExecutionService(registry), state_dir=state_dir)
+    assert recovered.list_jobs() == {"jobs": []}
 
 
 def test_malformed_state_does_not_break_recovery(tmp_path: Path) -> None:
@@ -235,8 +303,26 @@ def test_redirecting_state_directory_is_rejected(tmp_path: Path) -> None:
 
     project = tmp_path / "project"
     project.mkdir()
-    with pytest.raises(JobError, match="redirecting link|reparse"):
+    with pytest.raises(JobError, match="redirecting link|reparse|non-redirecting"):
         _manager(project, linked_state)
+
+
+def test_redirecting_state_file_is_ignored_during_recovery(tmp_path: Path) -> None:
+    state_dir = tmp_path / "job-state"
+    state_dir.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside.json"
+    job_id = "f" * 32
+    outside.write_text(json.dumps(_state_payload(job_id)), encoding="utf-8")
+    linked = state_dir / f"{job_id}.job.json"
+    try:
+        linked.symlink_to(outside)
+    except OSError:
+        pytest.skip("Symbolic links are unavailable in this environment.")
+
+    recovered = _manager(project, state_dir)
+    assert recovered.list_jobs() == {"jobs": []}
 
 
 def test_start_validation_rejects_unknown_executable_before_allocating_job(tmp_path: Path) -> None:
