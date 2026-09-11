@@ -4,120 +4,93 @@
 
 - files outside explicitly authorized project roots;
 - credentials, tokens, private keys, cookies, and environment secrets;
-- integrity of local source repositories;
-- host operating system integrity;
-- availability of CPU, RAM, GPU, disk, and network resources;
-- private benchmark data and runtime logs;
-- Git history and remote repositories.
+- integrity of local repositories and the host operating system;
+- CPU, RAM, GPU, disk, and network availability;
+- private benchmark/runtime data;
+- Git history and remotes.
 
 ## Threats and mitigations
 
 ### Prompt injection through repository content
 
-**Scenario:** A README, source comment, log, or generated file tells the AI to read secrets, escape the project root, or later execute dangerous commands.
+**Scenario:** Source, documentation, logs, or generated files instruct the model to escape policy.
 
-**Mitigation:** Repository content is data, not policy. Local permission/path checks reject disallowed operations independently of model reasoning. Phase 3 exposes read-only capabilities only.
+**Mitigation:** Content is data, not policy. Local project, permission, path, sensitive-file, and resource controls apply independently of model reasoning.
 
-### Path traversal
+### Lexical path traversal
 
-**Scenario:** A caller requests `../../secret.txt`, an absolute path, a Windows drive/UNC path, mixed separators, or another lexical form intended to escape the root.
+**Scenario:** A caller uses `..`, an absolute/UNC/drive path, ADS syntax, device names, or mixed separators to escape a root.
 
-**Mitigation:** Phase 3 accepts project-relative paths only, normalizes separators, rejects `..`, drive/UNC/absolute paths, control characters, NTFS ADS syntax, ambiguous Windows suffixes, and reserved device names before I/O. Effective paths are then strictly resolved and checked against the canonical project root.
+**Mitigation:** Only project-relative paths are accepted. Unsafe lexical forms are rejected before I/O; effective paths must then resolve under the canonical project root.
 
-### Symlink, junction, or reparse-point escape
+### Symlink or junction escape
 
-**Scenario:** A path inside an allowed project points to a target outside it.
+**Scenario:** A path component inside a project redirects to another location.
 
-**Mitigation:** Phase 3 rejects standard symbolic-link path components and also rejects any strictly resolved path that leaves the registered root. Recursive search does not follow standard symlinks and re-checks canonical containment for discovered entries. Phase 4 is dedicated to stronger Windows junction/reparse-point and TOCTOU defenses before process execution is enabled.
+**Mitigation:** Phase 4 inspects components without following them and rejects symlinks and redirecting Windows name-surrogate reparse points, including junction-style paths. Redirecting children are omitted from listings/search. Nested mount points are denied.
+
+### Hard-link escape
+
+**Scenario:** A hard link inside an authorized root names the same regular file object as a sensitive file outside the root on the same volume.
+
+**Mitigation:** Phase 4 denies regular files whose link count is greater than one. Such files are not read or exposed as normal list/search targets.
+
+### File replacement / TOCTOU
+
+**Scenario:** A local process replaces a checked file or redirects its pathname between authorization and use.
+
+**Mitigation:** Phase 4 captures non-following file identity, opens read-only (`O_NOFOLLOW` where available), compares descriptor identity, revalidates the pathname and identity, and only then reads content. Identity mismatch fails closed before content is returned.
+
+### Directory replacement during enumeration
+
+**Scenario:** A directory is replaced while `list_directory` or recursive search enumerates it.
+
+**Mitigation:** Directory identity is captured before enumeration and revalidated afterward. A changed directory causes the snapshot to be discarded. Search queues project-relative paths and reauthorizes each directory/file when actually used.
 
 ### Secret exfiltration from an authorized root
 
-**Scenario:** An authorized source tree itself contains `.env`, SSH/cloud credentials, private keys, Terraform state, or token files, and the model asks the read tool for them.
+**Scenario:** The source tree contains `.env`, cloud/SSH credentials, keys, Terraform state, or token files.
 
-**Mitigation:** Phase 3 applies a defense-in-depth sensitive-path deny policy in addition to project-level read permission. Common credential directories/files and private-key formats are inaccessible. Operators should still keep real secrets outside authorized roots because deny patterns cannot identify every secret.
+**Mitigation:** A defense-in-depth sensitive-path deny policy blocks common secret-bearing locations/formats even when project read permission is granted. Real secrets should still be kept outside authorized roots.
 
-### NTFS alternate data streams and device paths
+### Binary or oversized extraction / search exhaustion
 
-**Scenario:** Windows-specific syntax such as `file.txt:stream`, `CON`, `NUL`, or drive/device paths bypasses normal filename filtering.
+**Scenario:** Huge/binary/model/database files or enormous trees consume RAM, disk I/O, or model context.
 
-**Mitigation:** Colon/ADS syntax, Windows drive qualification, UNC paths, and reserved DOS device names are rejected at the project-relative path parser.
-
-### Binary or oversized file extraction
-
-**Scenario:** A caller reads a huge file, binary artifact, database, model weight, or a file that grows after an initial size check, consuming RAM/context or leaking opaque data.
-
-**Mitigation:** `read_file` is UTF-8 text-only, rejects NUL-containing content, has a hard byte ceiling and line pagination, and performs a bounded file-descriptor read of at most `limit + 1` bytes rather than relying solely on `stat()`.
-
-### Recursive-search resource exhaustion
-
-**Scenario:** A model searches a very large source tree or directory containing millions of entries and causes excessive disk I/O, memory allocation, or MCP output.
-
-**Mitigation:** Search caps query length, result count, entries inspected, files scanned, bytes per file, and total bytes. Directory enumeration is bounded before entries are materialized in memory. Search uses literal substring matching rather than attacker-controlled regular expressions.
+**Mitigation:** Reads are UTF-8 text-only and bounded at the descriptor. Listings/search cap entries, files, per-file bytes, total bytes, query length, and results. Search uses literal substring matching rather than caller-controlled regex.
 
 ### Command injection
 
-**Scenario:** User/model-controlled text is passed through `cmd.exe`, PowerShell, or a POSIX shell and interpreted as extra commands.
+**Scenario:** Future caller input is interpreted by `cmd.exe`, PowerShell, or a POSIX shell.
 
-**Mitigation:** No process-execution MCP capability exists in Phase 3. Future execution keeps arbitrary shell strings disabled and launches approved executables with argument arrays.
+**Mitigation:** No process-execution MCP tool exists in Phase 4. Phase 5 must launch approved executables using argument vectors and must not expose a generic shell-string primitive.
 
-### Executable substitution
+### Executable substitution / working-directory escape
 
-**Scenario:** A future allowlisted executable name resolves to a malicious binary earlier in `PATH`.
+**Scenario:** An allowlisted executable name resolves to attacker-controlled code or a future process starts outside its project.
 
-**Mitigation:** Future execution must validate executable resolution, constrain inherited `PATH`, and support absolute executable policies where appropriate.
-
-### Working-directory escape
-
-**Scenario:** A future approved executable starts outside its authorized project root.
-
-**Mitigation:** Future working directories must use the hardened project-path authorization boundary before process launch.
-
-### Resource exhaustion by future jobs
-
-**Scenario:** Repeated jobs consume excessive CPU/GPU/RAM/disk, produce unbounded logs, or run indefinitely.
-
-**Mitigation:** Planned controls include per-project concurrency, timeouts, output limits, cancellation, runtime quotas where practical, and explicit job state.
+**Mitigation:** Phase 5 must constrain executable resolution/PATH and authorize working directories through the hardened project boundary.
 
 ### Destructive Git operation
 
-**Scenario:** An agent force-pushes, resets, cleans, deletes branches, or rewrites history.
+**Scenario:** An agent resets, cleans, force-pushes, deletes branches, or rewrites history.
 
-**Mitigation:** Git capabilities are not present in Phase 3. Future Git tools will begin with narrow non-destructive operations and deny destructive history operations by default.
+**Mitigation:** Git MCP capabilities are absent in Phase 4. Future Git tools begin narrowly and deny destructive history operations by default.
 
-### Public MCP exposure
+### Public MCP exposure / compromised cloud account
 
-**Scenario:** A development server is exposed directly to the internet without suitable authentication or transport security.
+**Scenario:** An unauthenticated endpoint or compromised AI session sends malicious requests.
 
-**Mitigation:** Current development uses local stdio. Remote integration will use authenticated encrypted transport/tunneling while retaining all local authorization checks.
+**Mitigation:** Current development uses local stdio. Remote integration will require authenticated encrypted transport, but authentication never replaces local capability/path enforcement.
 
-### Compromised MCP client or account
+### Malicious future child-process output
 
-**Scenario:** A cloud AI account/session is compromised and issues validly authenticated malicious MCP requests.
+**Scenario:** Benchmarks/tests emit prompt injection, control characters, secrets, or unbounded output.
 
-**Mitigation:** Authentication is not the authorization boundary. Per-project permissions, relative-path-only tools, sensitive-path filters, resource limits, and later audit/approval controls limit impact.
+**Mitigation:** Future job output must be treated as untrusted data, bounded, structured where practical, and sanitized where rendering could interpret controls.
 
-### Filesystem race / TOCTOU
+## Residual Phase 4 risk
 
-**Scenario:** A local process changes a checked path, symlink, junction, or file identity after authorization but before/during open.
+Phase 4 materially hardens application-level path access but does **not** claim a hardened multi-user/kernel sandbox or formal containment of a concurrently malicious local process with arbitrary filesystem privileges. It does not make hostile native executables safe to run.
 
-**Mitigation:** Phase 3 bounds the impact of reads but does not claim complete race-resistant filesystem isolation. Phase 4 explicitly owns TOCTOU and Windows reparse-point hardening. Process execution stays disabled until that work is reviewed.
-
-### Malicious child-process output
-
-**Scenario:** A future benchmark/test emits prompt-injection text, terminal control characters, secrets, or huge output.
-
-**Mitigation:** Future job output is treated as untrusted data, bounded, structured where practical, and sanitized for terminal controls.
-
-## Out of scope for the current implementation
-
-The current Phase 3 implementation does not claim to provide:
-
-- a hardened multi-user operating-system sandbox;
-- arbitrary host administration;
-- unrestricted shell access;
-- general-purpose containment of hostile native executables;
-- filesystem write/delete/rename operations;
-- complete race-proof behavior against a simultaneously malicious local filesystem actor;
-- complete Windows reparse-point hardening before Phase 4.
-
-These require stronger controls than basic application-level path policy alone.
+The current implementation also intentionally does not provide filesystem writes/deletes/renames, process execution, Git mutation, arbitrary host administration, or unrestricted shell access. Those capabilities require separate policy and tests in later phases.

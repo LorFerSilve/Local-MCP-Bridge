@@ -1,14 +1,14 @@
 # Example configuration only. Copy to config/config.yaml for local use.
 # The real config is ignored by Git and must never be committed.
 
-# Reserved for the later HTTP/tunnel transport phase. Phase 3 still uses stdio.
+# Reserved for the later HTTP/tunnel transport phase. Phase 4 still uses stdio.
 server:
   host: "127.0.0.1"
   port: 8000
 
-# Security intent for future configurable policy. Phase 3 filesystem resource
-# ceilings are currently hard-coded safe upper bounds and cannot be increased
-# through local configuration.
+# Security intent for future configurable policy. Filesystem resource ceilings and
+# Phase 4 path-confinement controls are hard-coded safe policy and cannot be
+# weakened through local configuration.
 security:
   deny_by_default: true
   allow_arbitrary_shell: false
@@ -24,7 +24,7 @@ projects:
       execute: false
       git: false
 
-    # Reserved for later execution phases. These values are not active in Phase 3.
+    # Reserved for later execution phases. These values are not active in Phase 4.
     allowed_executables:
       - python
       - git
@@ -33,7 +33,7 @@ projects:
       max_concurrent_jobs: 1
       default_timeout_seconds: 300
 
-# Active Phase 3 policy:
+# Active Phase 4 policy:
 # - Project IDs are lowercase, start with a letter, and may contain digits/hyphens.
 # - Project roots must be absolute, existing directories and may not overlap.
 # - Duplicate YAML keys and unknown project/permission keys are rejected.
@@ -41,7 +41,13 @@ projects:
 # - Filesystem callers use project IDs plus project-relative paths only.
 # - list_directory/read_file require read=true.
 # - search_text requires both read=true and search=true.
-# - Common secret/credential paths and standard symlink paths are restricted.
+# - Common secret/credential paths are restricted.
+# - Symlinks, redirecting Windows reparse points/junctions and nested mount points
+#   are rejected rather than followed.
+# - Hard-linked regular files are rejected to prevent cross-root hardlink reads.
+# - File identity is verified before and after open, before content is read.
+# - Directory identity is rechecked around enumeration; recursive search
+#   re-authorizes every file immediately before reading it.
 # - Reads, listings, recursive search and result counts have hard safety limits.
 # - MCP path metadata never exposes configured absolute roots.
 # - If config/config.yaml is absent, the bridge starts with zero authorized projects.

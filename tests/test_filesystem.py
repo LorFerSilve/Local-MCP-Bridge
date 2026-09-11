@@ -1,4 +1,4 @@
-"""Security-focused tests for Phase 3 read-only filesystem tools."""
+"""Security-focused tests for read-only filesystem tools."""
 
 from pathlib import Path
 
@@ -157,7 +157,7 @@ def test_standard_symbolic_link_escape_is_rejected(tmp_path: Path) -> None:
         pytest.skip("Symbolic links are unavailable in this environment.")
 
     service = _service(project_root)
-    with pytest.raises(FilesystemAccessError, match="Symbolic-link"):
+    with pytest.raises(FilesystemAccessError, match="Redirecting"):
         service.read_file("demo", "outside-link/secret.txt")
 
 
