@@ -236,7 +236,7 @@ class JobManager:
             except OSError as exc:
                 raise JobError("Job state path cannot be safely inspected.") from exc
             if is_redirecting_metadata(metadata):
-                raise JobError("Job state path may not contain redirecting links or reparse points.")
+                raise JobError("Job state path contains a redirecting link or reparse point.")
 
     def _prepare_state_directory(self) -> None:
         assert self._state_dir is not None
