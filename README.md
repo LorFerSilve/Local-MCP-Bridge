@@ -26,7 +26,7 @@ Core rules:
 - **Direct argv execution.** Processes are launched without shell-string parsing.
 - **Confined working directories.** `cwd` is project-relative and validated by the Phase 4 `PathGuard`.
 - **Minimal child environment.** Arbitrary parent environment variables and credentials are not inherited.
-- **Bounded execution.** Argument count/size, runtime, combined stdout/stderr, and per-project concurrency are capped.
+- **Bounded execution.** Argument count/size, runtime, combined stdout/stderr, and per-project concurrency are capped; excess concurrent calls fail immediately instead of building an unbounded queue.
 - **Untrusted output handling.** Control characters are escaped and the configured project-root string is redacted before output is returned.
 - **Local secrets stay local.** Real config, credentials, logs, runtime state, and machine-specific paths remain ignored by Git.
 - **Hermetic tests.** Importing the reusable MCP server factory never reads machine-local runtime configuration.
@@ -59,6 +59,7 @@ Local-MCP-Bridge/
 │   └── server.py
 ├── tests/
 │   ├── test_execution.py
+│   ├── test_execution_concurrency.py
 │   ├── test_execution_resolution.py
 │   ├── test_filesystem.py
 │   ├── test_path_confinement.py
@@ -197,6 +198,11 @@ resolve executable
 recheck executable identity
         |
         v
+acquire bounded project execution slot
+        |
+        +-- fail immediately when all slots are occupied
+        |
+        v
 build minimal child environment
         |
         v
@@ -216,7 +222,7 @@ sanitize/redact bounded output
 return structured result
 ```
 
-A non-zero child exit code is returned as a normal structured process result. Policy failures, invalid paths, invalid argv, and unallowlisted executable requests fail as MCP errors.
+A non-zero child exit code is returned as a normal structured process result. Policy failures, invalid paths, invalid argv, unallowlisted executable requests, and exhausted execution capacity fail as MCP errors.
 
 ### Execution limits
 
@@ -229,7 +235,7 @@ The implementation has hard ceilings in addition to local configuration:
 - maximum individual argument length: 4096 characters;
 - maximum combined argument length: 16384 characters.
 
-The example configuration is intentionally stricter than those hard ceilings.
+The example configuration is intentionally stricter than those hard ceilings. Execution capacity is fail-fast: requests beyond the active per-project concurrency limit are rejected instead of queued inside the bridge.
 
 ## Important residual execution risk
 
