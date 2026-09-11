@@ -43,4 +43,4 @@ def test_runtime_import_still_fails_closed_for_invalid_explicit_config(tmp_path:
 
     assert result.returncode != 0
     assert "ConfigError" in result.stderr
-    assert "does not exist" in result.stderr
+    assert "Cannot access configuration file" in result.stderr
