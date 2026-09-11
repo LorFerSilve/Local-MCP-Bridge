@@ -27,10 +27,11 @@ Core rules:
 - **Confined working directories.** `cwd` is project-relative and validated by the Phase 4 `PathGuard`.
 - **Minimal child environment.** Arbitrary parent environment variables and credentials are not inherited.
 - **Bounded execution.** Argument count/size, runtime, output, and concurrency are capped.
-- **Bounded job management.** Background-job inventory, retained history, state-file size, list results, and output pages are capped.
+- **Bounded job management.** Background-job inventory, retained history, state-file size, recovery work, list results, and output pages are capped.
 - **No argv persistence.** Raw command arguments are never written to job-state files.
 - **Hardened job-state paths.** Runtime job state rejects redirecting symlink/junction/reparse components and unsafe state files.
-- **Untrusted output handling.** Control characters are escaped and the configured project-root string is redacted before output is returned or retained as job output.
+- **Recovery reauthorization.** Persisted jobs are exposed again only when the current project and executable policy still authorizes them.
+- **Untrusted output handling.** Control characters are escaped and the configured project-root string is redacted before output is returned or retained as job output; recovered output is processed again.
 - **Local runtime state stays local.** Real config, credentials, job state, logs, and machine-specific paths remain ignored by Git.
 - **Hermetic tests.** Importing the reusable MCP server factory never reads machine-local configuration or creates persistent runtime state.
 
@@ -232,9 +233,11 @@ That directory is ignored by Git. A different location may be selected with:
 LOCAL_MCP_BRIDGE_JOB_STATE_DIR
 ```
 
-When supplied, the override must be an absolute path. The state directory rejects redirecting symlink/junction/reparse components. State files are written through temporary files and atomic replacement; redirecting, hard-linked, malformed, and oversized state files are ignored during recovery.
+When supplied, the override must be an absolute path. The state directory rejects redirecting symlink/junction/reparse components. State files are written through exclusive temporary files, `fsync`, and atomic replacement. Redirecting, hard-linked, malformed, and oversized state files are ignored during recovery, and actual record reads reuse the shared race-resistant `PathGuard` primitive.
 
-Persistent state deliberately contains **no raw argv**. It stores only bounded safe metadata plus the already-sanitized/redacted captured stdout and stderr. Output can still contain sensitive information deliberately printed by executed code, so `runtime/` must be treated as local sensitive state and must never be committed.
+Persistent state deliberately contains **no raw argv**. It stores only bounded safe metadata plus sanitized/redacted captured stdout and stderr. Output can still contain sensitive information deliberately printed by executed code, so `runtime/` must be treated as local sensitive state and must never be committed.
+
+Recovery is a fresh authorization decision: a record is admitted only when the current registry still contains its project, `execute` remains enabled, and its executable alias remains allowlisted. Recovered output/error text is sanitized and project-root-redacted again before MCP exposure.
 
 ### Restart semantics
 
@@ -255,7 +258,9 @@ In addition to the underlying process limits, the manager enforces:
 - at most 100 jobs returned by one list call;
 - at most 131072 characters returned by one output-page request;
 - at most 8 MiB per persisted state file;
-- at most 1024 candidate state files scanned during startup recovery.
+- at most 1024 candidate state files examined during startup recovery;
+- at most 64 MiB of candidate state bytes attempted during startup recovery;
+- at most 4 MiB combined recovered stdout/stderr characters per admitted record.
 
 These limits are local safety ceilings and do not turn executed code into a sandbox.
 
@@ -269,7 +274,7 @@ Application-level policy cannot turn arbitrary native or interpreted code into a
 - consume resources not bounded by the operating system;
 - deliberately print sensitive host data it can access.
 
-Phase 6 separates long-running work from individual MCP calls and adds bounded local state/recovery. It does **not** claim containment against intentionally hostile code.
+Phase 6 separates long-running work from individual MCP calls and adds bounded local state/recovery. It does **not** claim containment against intentionally hostile code. POSIX cancellation/timeout can target the launched process group; portable Windows behavior guarantees the direct child but does not claim recursive descendant containment.
 
 ## Configuration policy
 
@@ -312,7 +317,7 @@ The repository also preserves a detailed future architecture proposal in [`futur
 
 ## Current status
 
-**Phase 6 complete.** The bridge can inspect authorized project files, run bounded one-shot processes, and supervise background jobs by opaque ID with persistent terminal history, bounded output retrieval, cancellation, and conservative restart recovery. Phase 7 will add constrained Git synchronization tools.
+**Phase 6 complete.** The bridge can inspect authorized project files, run bounded one-shot processes, and supervise background jobs by opaque ID with persistent terminal history, bounded output retrieval, cancellation, reauthorization, and conservative restart recovery. Phase 7 will add constrained Git synchronization tools.
 
 ## License
 
