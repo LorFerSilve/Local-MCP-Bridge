@@ -50,6 +50,7 @@ def _manager(root: Path, state_dir: Path | None = None) -> JobManager:
 
 
 def _state_payload(job_id: str, *, stdout: str = "partial", status: str = "running") -> dict:
+    active = status in {"starting", "running", "cancelling"}
     return {
         "schema_version": 1,
         "job_id": job_id,
@@ -59,7 +60,7 @@ def _state_payload(job_id: str, *, stdout: str = "partial", status: str = "runni
         "status": status,
         "created_at": "2026-09-11T00:00:00.000Z",
         "started_at": "2026-09-11T00:00:01.000Z",
-        "finished_at": None if status in {"starting", "running", "cancelling"} else "2026-09-11T00:00:02.000Z",
+        "finished_at": None if active else "2026-09-11T00:00:02.000Z",
         "exit_code": None,
         "termination_reason": None,
         "output_truncated": False,
@@ -287,6 +288,20 @@ def test_malformed_state_does_not_break_recovery(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (state_dir / f"{'b' * 32}.job.json").write_text("{not-json", encoding="utf-8")
+
+    recovered = _manager(project, state_dir)
+    assert recovered.list_jobs() == {"jobs": []}
+
+
+def test_malformed_state_types_do_not_break_recovery(tmp_path: Path) -> None:
+    state_dir = tmp_path / "job-state"
+    state_dir.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    job_id = "1" * 32
+    payload = _state_payload(job_id)
+    payload["status"] = ["running"]
+    (state_dir / f"{job_id}.job.json").write_text(json.dumps(payload), encoding="utf-8")
 
     recovered = _manager(project, state_dir)
     assert recovered.list_jobs() == {"jobs": []}
