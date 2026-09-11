@@ -1,0 +1,25 @@
+# Phase 7 Git synchronization policy template.
+# Copy this file to config/git.local.yaml for local use.
+# config/*.local.yaml is ignored by Git and must never be committed.
+#
+# Git remains disabled for a project unless it has an entry in this local overlay.
+# The MCP caller never supplies the remote URL, remote name, branch, or arbitrary Git argv.
+
+projects:
+  example-project:
+    # Must match the repository's existing local remote.<name>.url exactly.
+    remote: origin
+
+    # The only branch Phase 7 may fetch/synchronize for this project.
+    branch: main
+
+    # Phase 7 accepts HTTPS only and rejects embedded credentials/query/fragment.
+    # Private repositories requiring interactive credentials are intentionally not
+    # supported by this phase's fail-closed credential policy.
+    remote_url: "https://github.com/example/example-project.git"
+
+    # Hard application ceiling is 120 seconds.
+    timeout_seconds: 60
+
+    # Combined stdout/stderr safety ceiling; hard maximum is 1 MiB.
+    max_output_bytes: 262144
