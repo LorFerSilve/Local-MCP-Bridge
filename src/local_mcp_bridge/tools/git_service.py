@@ -6,7 +6,7 @@ import asyncio
 
 from typing_extensions import TypedDict
 
-from local_mcp_bridge.registry import GitSettings, ProjectRecord, ProjectRegistry, RegistryError
+from local_mcp_bridge.registry import ProjectRegistry, RegistryError
 from local_mcp_bridge.tools.git_repository import GitRepository, GitRepositoryError
 from local_mcp_bridge.tools.git_runner import GitCommandRunner
 
@@ -154,7 +154,9 @@ class GitService:
         async with lock:
             try:
                 await repository.validate()
-                return await self._fetch_locked(repository)
+                result = await self._fetch_locked(repository)
+                await repository.validate()
+                return result
             except GitRepositoryError as exc:
                 raise GitError(str(exc)) from exc
 
@@ -174,6 +176,7 @@ class GitService:
                 await repository.validate()
                 await self._require_sync_preconditions(repository)
                 fetched = await self._fetch_locked(repository)
+                await repository.validate()
                 await self._require_sync_preconditions(repository)
 
                 previous = await repository.rev_parse("HEAD")
