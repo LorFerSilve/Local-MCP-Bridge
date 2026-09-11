@@ -25,6 +25,12 @@ from local_mcp_bridge.tools.filesystem import (
     ReadFileResult,
     SearchTextResult,
 )
+from local_mcp_bridge.tools.git_service import (
+    GitFetchResult,
+    GitService,
+    GitStatusResult,
+    GitSyncResult,
+)
 
 SERVER_NAME = "Local MCP Bridge"
 
@@ -40,6 +46,7 @@ class HealthStatus(TypedDict):
     execution_enabled: bool
     jobs_enabled: bool
     persistent_jobs: bool
+    git_enabled: bool
 
 
 class ProjectListStatus(TypedDict):
@@ -60,11 +67,13 @@ def create_mcp_server(
     filesystem_limits: FilesystemLimits | None = None,
     execution_service: ExecutionService | None = None,
     job_manager: JobManager | None = None,
+    git_service: GitService | None = None,
 ) -> MCPServer:
     """Create a bridge server bound to explicitly supplied runtime services.
 
     This factory intentionally avoids machine-local config and persistent state.
-    The real runtime module supplies a disk-backed job manager; tests use memory.
+    The real runtime module supplies the Git-enabled registry and disk-backed jobs;
+    tests can inject in-memory services.
     """
     active_registry = registry if registry is not None else ProjectRegistry.empty()
     filesystem = FilesystemService(active_registry, filesystem_limits)
@@ -73,6 +82,7 @@ def create_mcp_server(
         raise ValueError("execution_service and job_manager must be supplied together.")
     execution = execution_service or ExecutionService(active_registry)
     jobs = job_manager or JobManager(active_registry, execution)
+    git = git_service or GitService(active_registry)
     server = MCPServer(SERVER_NAME)
 
     @server.tool()
@@ -87,6 +97,7 @@ def create_mcp_server(
             execution_enabled=True,
             jobs_enabled=True,
             persistent_jobs=jobs.persistent,
+            git_enabled=True,
         )
 
     @server.tool()
@@ -200,5 +211,20 @@ def create_mcp_server(
     async def cancel_job(job_id: str) -> JobCancelResult:
         """Cancel a supervised running job."""
         return await jobs.cancel_job(job_id)
+
+    @server.tool()
+    async def git_status(project_id: str) -> GitStatusResult:
+        """Return path-free status and ahead/behind metadata for an authorized repository."""
+        return await git.git_status(project_id)
+
+    @server.tool()
+    async def git_fetch(project_id: str) -> GitFetchResult:
+        """Fetch only the configured branch from the trusted local HTTPS remote."""
+        return await git.git_fetch(project_id)
+
+    @server.tool()
+    async def git_sync_fast_forward(project_id: str) -> GitSyncResult:
+        """Fast-forward a clean checked-out branch to the verified fetched head."""
+        return await git.git_sync_fast_forward(project_id)
 
     return server
