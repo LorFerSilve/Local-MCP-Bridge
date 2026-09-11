@@ -17,7 +17,7 @@ import stat
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from typing_extensions import TypedDict
@@ -125,12 +125,13 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def _relative_text(raw: str) -> str:
+def _normalize_cwd(raw: str) -> tuple[str, PurePosixPath]:
     try:
         normalized = normalize_relative_path(raw)
     except PathConfinementError as exc:
         raise JobError("Working directory is not a valid project-relative path.") from exc
-    return "." if normalized.parts == (".",) else normalized.as_posix()
+    text = "." if normalized.parts == (".",) else normalized.as_posix()
+    return text, normalized
 
 
 @dataclass(slots=True)
@@ -315,9 +316,9 @@ class JobManager:
             raise JobError("Executable is not allowlisted for this project.") from exc
 
         validated_args = self._validate_arguments(args)
-        safe_cwd = _relative_text(cwd)
+        safe_cwd, normalized_cwd = _normalize_cwd(cwd)
         try:
-            PathGuard(project.root).resolve_existing(safe_cwd, expected="directory")
+            PathGuard(project.root).resolve_existing(normalized_cwd, expected="directory")
         except PathConfinementError as exc:
             raise JobError("Working directory is not safely confined to the project.") from exc
 
