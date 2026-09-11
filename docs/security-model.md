@@ -2,170 +2,87 @@
 
 ## Trust model
 
-The bridge assumes all of the following may be malicious, compromised, misleading, or simply wrong:
-
-- model-generated tool calls;
-- repository text, logs, documentation, generated artifacts, and test fixtures;
-- MCP client input;
-- filenames, paths, and search queries;
-- future command arguments;
-- future child-process output.
-
-The deterministic local policy layer is the authorization boundary. Security must not depend on the model following instructions correctly.
+The bridge assumes model-generated calls, repository content, MCP input, filenames, paths, future command arguments, and future child-process output may be malicious or incorrect. The deterministic local policy layer is the authorization boundary; security never depends on the model behaving correctly.
 
 ## Deny by default
 
-Every project is registered explicitly. Capabilities are granted per project and per operation.
+Projects are registered explicitly. Current capability flags are `read`, `search`, `execute`, and `git`; missing permissions are denied. `search: true` requires `read: true`. Process execution and Git MCP tools remain unavailable in Phase 4 even if those reserved flags appear in local configuration.
 
-Current capability flags are:
+## Project registry boundary
 
-- `read` — list directories and read text files;
-- `search` — perform bounded plain-text search, requiring `read` as well;
-- `execute` — reserved for a later phase;
-- `git` — reserved for a later phase.
+The registry maps AI-visible project IDs to canonical local roots. Absolute roots remain server-side. Roots must exist, be absolute directories, and may not overlap. Duplicate YAML keys, unknown project/permission keys, invalid IDs, and invalid permission combinations fail closed.
 
-A missing permission means denied.
+No local config means an empty runtime registry. An explicitly selected invalid config fails closed. The pure MCP server factory does not read machine-local config, keeping pytest hermetic.
 
-## Project registry guarantees
+## Phase 4 filesystem authorization
 
-The registry maps AI-visible logical project IDs to canonical local filesystem roots while keeping those roots server-side.
+Every read-only filesystem request follows this sequence:
 
-Before a project enters the registry:
+1. resolve the project ID and required permission;
+2. parse a project-relative path and reject unsafe lexical forms;
+3. reject common sensitive/credential paths;
+4. inspect each existing path component without following redirections;
+5. reject symbolic links, redirecting Windows name-surrogate reparse points/junctions, and nested filesystem mount points;
+6. strictly resolve the effective path and prove canonical containment in the configured root;
+7. reject unsupported file types and hard-linked regular files;
+8. perform operation-specific identity checks and bounded I/O;
+9. return project-relative metadata only.
 
-1. its ID must match the restricted lowercase grammar;
-2. its root must be absolute;
-3. the root must exist and resolve successfully;
-4. the resolved root must be a directory;
-5. registered roots may not be identical or overlap/nest;
-6. duplicate YAML mapping keys are rejected;
-7. unknown project and permission keys are rejected;
-8. permissions default to denied;
-9. `search: true` requires `read: true`.
+Rejected lexical forms include POSIX absolute paths, Windows drive/UNC paths, `..`, control/NUL characters, NTFS ADS/colon syntax, reserved DOS device names, and components ending in a Windows-ambiguous space or period.
 
-No local config means an empty registry. An explicitly selected missing or invalid config fails closed.
+## Link and reparse-point policy
 
-## Phase 3 filesystem authorization
+Phase 4 intentionally does not support symlink traversal, even when the link target remains inside the authorized root. On Windows, name-surrogate reparse points are treated as path redirections and denied; this includes junction/mount-point style redirection. Reparse metadata that is not a name surrogate is not automatically classified as a path redirect, avoiding a blanket policy that would unnecessarily reject unrelated metadata such as some cloud-file attributes.
 
-Phase 3 introduces read-only filesystem content access. Each operation follows this authorization sequence:
+Nested filesystem mount points are also denied. This keeps one registered project root from silently crossing into a separately mounted namespace.
 
-1. resolve the logical project ID;
-2. verify the operation-specific permission;
-3. parse the caller path as project-relative input;
-4. reject dangerous lexical forms;
-5. reject common sensitive/credential paths;
-6. reject ordinary symbolic-link components;
-7. strictly resolve the effective filesystem path;
-8. verify the resolved path remains inside the canonical project root;
-9. apply type checks and hard resource limits;
-10. only then return bounded content or metadata.
+## Hard-link policy
 
-Caller-supplied path fields never select a host root.
+Regular files with more than one hard link are denied. Canonical pathname containment alone cannot distinguish a hard link created inside an authorized root from another name for the same file object outside that root on the same volume. Denying hard-linked regular files removes that cross-root read channel before process execution is introduced.
 
-### Rejected path forms
+## Race-resistant file reads
 
-Phase 3 rejects, among other cases:
+`read_file` and search reads use the `PathGuard` confinement layer. Before content is read it:
 
-- POSIX absolute paths;
-- Windows drive-qualified and UNC paths;
-- `..` parent traversal;
-- NUL/control characters;
-- NTFS alternate-data-stream syntax using `:`;
-- Windows reserved device names such as `CON`, `NUL`, `COM1`, and `LPT1`;
-- path components ending in a Windows-ambiguous space or period;
-- ordinary symbolic-link components.
+- resolves and validates the project-relative path;
+- captures file identity from non-following metadata;
+- opens the file read-only, using `O_NOFOLLOW` where the platform provides it;
+- compares the opened descriptor identity with the authorized pre-open identity;
+- re-resolves/revalidates the pathname and compares identity again;
+- only then reads a bounded number of bytes from the already-open descriptor.
 
-The implementation verifies containment using resolved path objects rather than string-prefix checks.
+If the path or file object changes during authorization, the operation fails before returning content. Once a validated descriptor is open, later pathname replacement does not redirect that descriptor to another file.
+
+## Directory enumeration and recursive search
+
+Directory listing captures bounded non-following entry metadata and verifies the directory identity before and after enumeration. If the directory is replaced during enumeration, the snapshot is discarded.
+
+Recursive search stores only project-relative paths. It does not retain a previously resolved absolute pathname as ongoing authorization. Each queued directory is revalidated when enumerated and every queued file is reauthorized immediately before reading. Redirecting/restricted children are omitted.
 
 ## Sensitive-path defense in depth
 
-Read permission does not automatically expose every file under the root. Phase 3 also denies common secret-bearing locations and formats, including examples such as:
+Read permission does not expose every file in a root. Common secret-bearing locations/formats remain denied, including `.env`, `.git`, SSH/cloud credential directories, credential/token directories, private-key formats, Terraform state, and common service-account files. Templates such as `.env.example` remain readable.
 
-- `.env` and non-template `.env.*` files;
-- `.git` and common SSH/cloud credential directories;
-- `credentials`, `secrets`, and `tokens` directories;
-- `.netrc`, `.npmrc`, `.pypirc`, and Git credential files;
-- common private-key/container formats such as `.key`, `.pem`, `.p12`, `.pfx`, and `.ppk`;
-- Terraform state and common service-account credential files.
+This is defense in depth, not secret discovery. Operators should keep real secrets outside authorized roots whenever practical.
 
-Environment templates such as `.env.example`, `.env.sample`, and `.env.template` remain readable.
+## Bounded I/O
 
-This filter is defense in depth. It cannot identify every possible secret, so operators should still keep secrets outside authorized project roots whenever practical.
+`read_file` is UTF-8 text-only, rejects NUL/binary content, caps bytes and lines, and exposes line continuation. Listings and recursive search cap directory entries, files, per-file bytes, total bytes, query length, and result count. Search is literal substring matching rather than caller-controlled regex.
 
-## Bounded reads and search
+## Security boundary and residual risk
 
-Filesystem content is treated as untrusted data and resource usage is capped.
+Phase 4 is **race-resistant application-level confinement**, not an operating-system sandbox. It substantially reduces path traversal, link/junction redirection, hard-link escape, and common check-then-use races, but it does not claim formal race-proof isolation against a concurrently malicious local process with arbitrary filesystem privileges.
 
-`read_file`:
-
-- accepts UTF-8 text only;
-- rejects NUL-containing/binary content;
-- enforces a hard file-size ceiling;
-- reads at most `limit + 1` bytes from the file descriptor;
-- returns at most a bounded number of lines per call;
-- exposes `next_start_line` for continuation.
-
-`list_directory`:
-
-- inspects only a bounded number of entries;
-- omits sensitive, symbolic-link, and unsupported entries;
-- returns project-relative paths only.
-
-`search_text`:
-
-- performs literal substring search rather than arbitrary regex evaluation;
-- bounds query length and result count;
-- bounds total directory entries, files, per-file bytes, and total bytes scanned;
-- bounds directory enumeration before materializing entries in memory;
-- skips binary, oversized, unreadable, restricted, and escaping paths.
-
-## Remaining filesystem hardening
-
-Phase 3 does not claim that application-level `resolve`/check/open sequences are a complete hostile-filesystem sandbox. Phase 4 must specifically address:
-
-- Windows junctions and other reparse points;
-- filesystem identity changes between authorization and use (TOCTOU);
-- race-resistant open strategies where supported;
-- adversarial Windows fixtures;
-- mount/reparse semantics that differ across platforms.
-
-Process execution remains disabled until this work is completed.
+That residual boundary matters for Phase 5: controlled child processes must still be narrowly allowlisted, run with project-scoped working directories, receive a filtered environment, and must not be treated as hostile native code safely contained by this library alone.
 
 ## Process execution
 
-Future execution must use an executable plus an argument vector, not a shell command string.
+Phase 5 must use an executable plus argument vector rather than a shell command string. Required controls include executable allowlists, deterministic executable resolution, project-scoped working directories, filtered environment inheritance, timeouts, output caps, concurrency limits, and explicit cancellation/job state. A generic `shell(command)` interface remains out of scope.
 
-Preferred conceptual API:
+## Git and network exposure
 
-```text
-start_job(
-    project_id="example-project",
-    executable="python",
-    args=["scripts/benchmark.py", "--phase", "10"]
-)
-```
+Future Git operations should be narrow and non-destructive by default. Development currently uses stdio; remote access must later use authenticated encrypted transport while retaining every local authorization check.
 
-Controls should include executable allowlists, project-scoped working directories, filtered environment inheritance, timeouts, output caps, concurrency limits, cancellation, job metadata, and local audit records.
+## Auditability and future writes
 
-## Git operations
-
-Git should be exposed as narrow operations rather than arbitrary Git command strings where practical. Force-push, reset, clean, branch deletion, and history rewriting remain denied unless a separately reviewed policy explicitly introduces them.
-
-## Output handling
-
-Tool output is untrusted data. Repository text can contain prompt injection instructions, terminal control characters, secrets, or very large content.
-
-The bridge therefore bounds content size and sanitizes control characters in search previews. Full source reads preserve text fidelity because code may legitimately contain escapes; clients must still treat returned content as data rather than authority.
-
-## Network exposure
-
-Development currently uses local stdio transport. Remote access will require authenticated encrypted transport, preferably through a controlled tunnel or reverse proxy.
-
-Authentication complements but never replaces local capability checks.
-
-## Auditability
-
-A later phase will add local audit records for security-relevant operations. Logs must remain local and must not themselves become a secret-exfiltration channel.
-
-## Future write access
-
-Filesystem modification is intentionally separate from read access. Before write/delete/rename tools are introduced, the project must add transactional safeguards, path-confinement tests, overwrite policy, recovery considerations, and explicit destructive-operation policy.
+A later phase will add local audit records. Filesystem writes/deletes/renames are intentionally separate from read access and require their own reviewed policy and recovery semantics before introduction.
