@@ -728,12 +728,11 @@ class JobManager:
             return None
 
         termination_reason = payload.get("termination_reason")
-        if termination_reason is not None:
-            if (
-                not isinstance(termination_reason, str)
-                or termination_reason not in _TERMINATION_REASONS
-            ):
-                return None
+        if termination_reason is not None and (
+            not isinstance(termination_reason, str)
+            or termination_reason not in _TERMINATION_REASONS
+        ):
+            return None
         exit_code = payload.get("exit_code")
         if exit_code is not None and type(exit_code) is not int:
             return None
