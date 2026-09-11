@@ -1,26 +1,29 @@
 """Read-only filesystem capabilities for authorized project roots.
 
-Phase 3 deliberately exposes only bounded read operations. Every caller-supplied
-path is interpreted as a project-relative path, canonicalized, and checked
-against the registered root before I/O occurs.
+Phase 4 routes every filesystem operation through a confinement guard that
+rejects redirecting links/reparse points and verifies file identity before any
+content is read.
 """
 
 from __future__ import annotations
 
-import os
 import re
 from collections import deque
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import PurePosixPath
 from typing import Literal
 
 from typing_extensions import TypedDict
 
 from local_mcp_bridge.registry import ProjectRecord, ProjectRegistry, RegistryError
+from local_mcp_bridge.security.paths import (
+    PathConfinementError,
+    PathGuard,
+    normalize_relative_path,
+)
 
 DEFAULT_READ_LINES = 400
 DEFAULT_SEARCH_RESULTS = 50
-MAX_PATH_CHARS = 1024
 _PREVIEW_CONTEXT = 120
 
 _SENSITIVE_DIRECTORIES = {
@@ -58,14 +61,6 @@ _SENSITIVE_SUFFIXES = {
     ".tfstate",
 }
 _ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
-_WINDOWS_DEVICE_NAMES = {
-    "con",
-    "prn",
-    "aux",
-    "nul",
-    *(f"com{number}" for number in range(1, 10)),
-    *(f"lpt{number}" for number in range(1, 10)),
-}
 
 
 class FilesystemAccessError(ValueError):
@@ -157,42 +152,6 @@ class FilesystemLimits:
             raise ValueError("Filesystem limits must all be positive integers.")
 
 
-def _normalize_relative_path(raw_path: str) -> PurePosixPath:
-    if not isinstance(raw_path, str):
-        raise FilesystemAccessError("Path must be a string.")
-    if "\x00" in raw_path or len(raw_path) > MAX_PATH_CHARS:
-        raise FilesystemAccessError("Path is invalid or exceeds the safety limit.")
-
-    portable = raw_path.replace("\\", "/")
-    posix_path = PurePosixPath(portable)
-    windows_path = PureWindowsPath(raw_path)
-
-    if posix_path.is_absolute() or windows_path.is_absolute() or windows_path.drive:
-        raise FilesystemAccessError("Only project-relative paths are allowed.")
-
-    parts = tuple(part for part in posix_path.parts if part not in ("", "."))
-    if any(part == ".." for part in parts):
-        raise FilesystemAccessError("Parent-directory traversal is not allowed.")
-
-    for part in parts:
-        if any(ord(character) < 32 for character in part):
-            raise FilesystemAccessError("Path contains unsupported control characters.")
-        if ":" in part:
-            raise FilesystemAccessError("Alternate data streams and colon paths are not allowed.")
-        if part.endswith((" ", ".")):
-            raise FilesystemAccessError("Path components may not end in a space or period.")
-        device_name = part.rstrip(" .").split(".", 1)[0].casefold()
-        if device_name in _WINDOWS_DEVICE_NAMES:
-            raise FilesystemAccessError("Reserved device paths are not allowed.")
-
-    return PurePosixPath(*parts) if parts else PurePosixPath(".")
-
-
-def _relative_text(path: Path, root: Path) -> str:
-    relative = path.relative_to(root)
-    return relative.as_posix() if relative.parts else "."
-
-
 def _is_sensitive(relative_path: PurePosixPath) -> bool:
     parts = tuple(part.casefold() for part in relative_path.parts if part not in ("", "."))
     if not parts:
@@ -216,37 +175,26 @@ def _is_sensitive(relative_path: PurePosixPath) -> bool:
     return any(name.endswith(suffix) for suffix in _SENSITIVE_SUFFIXES)
 
 
-def _contains_path(root: Path, candidate: Path) -> bool:
-    return candidate == root or root in candidate.parents
+def _relative_text(relative_path: PurePosixPath) -> str:
+    return relative_path.as_posix() if relative_path.parts != (".",) else "."
 
 
-def _reject_symlink_components(root: Path, relative_path: PurePosixPath) -> None:
-    current = root
-    for part in relative_path.parts:
-        if part == ".":
-            continue
-        current = current / part
-        try:
-            if current.is_symlink():
-                raise FilesystemAccessError("Symbolic-link paths are not allowed in Phase 3.")
-        except OSError as exc:
-            raise FilesystemAccessError("Path cannot be safely inspected.") from exc
-
-
-def _read_bounded_bytes(path: Path, max_bytes: int) -> bytes:
+def _safe_relative(raw_path: str) -> PurePosixPath:
     try:
-        with path.open("rb") as stream:
-            return stream.read(max_bytes + 1)
-    except OSError as exc:
-        raise FilesystemAccessError("File cannot be safely read.") from exc
+        return normalize_relative_path(raw_path)
+    except PathConfinementError as exc:
+        raise FilesystemAccessError(str(exc)) from exc
 
 
-def _normalize_discovered_path(path: Path, root: Path) -> PurePosixPath | None:
+def _guard_for(project: ProjectRecord) -> PathGuard:
     try:
-        relative_text = _relative_text(path, root)
-        return _normalize_relative_path(relative_text)
-    except (FilesystemAccessError, ValueError):
-        return None
+        return PathGuard(project.root)
+    except PathConfinementError as exc:
+        raise FilesystemAccessError(str(exc)) from exc
+
+
+def _guard_error(exc: PathConfinementError) -> FilesystemAccessError:
+    return FilesystemAccessError(str(exc))
 
 
 class FilesystemService:
@@ -279,99 +227,51 @@ class FilesystemService:
             raise FilesystemAccessError("Unknown project or filesystem access denied.")
         return project
 
-    def _resolve_existing(
+    def _authorize_path(
         self,
         project: ProjectRecord,
         raw_path: str,
-        *,
-        expected: Literal["file", "directory", "either"],
-    ) -> tuple[Path, PurePosixPath]:
-        relative_path = _normalize_relative_path(raw_path)
+    ) -> tuple[PathGuard, PurePosixPath]:
+        relative_path = _safe_relative(raw_path)
         if _is_sensitive(relative_path):
             raise FilesystemAccessError("The requested path is restricted.")
-
-        _reject_symlink_components(project.root, relative_path)
-        candidate = project.root.joinpath(*relative_path.parts)
-
-        try:
-            resolved = candidate.resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            raise FilesystemAccessError(
-                "Requested path does not exist or cannot be resolved."
-            ) from exc
-
-        if not _contains_path(project.root, resolved):
-            raise FilesystemAccessError("Requested path escapes the authorized project root.")
-
-        try:
-            if expected == "file" and not resolved.is_file():
-                raise FilesystemAccessError("Requested path is not a regular file.")
-            if expected == "directory" and not resolved.is_dir():
-                raise FilesystemAccessError("Requested path is not a directory.")
-            if expected == "either" and not (resolved.is_file() or resolved.is_dir()):
-                raise FilesystemAccessError("Requested path is not a regular file or directory.")
-        except OSError as exc:
-            raise FilesystemAccessError("Requested path cannot be safely inspected.") from exc
-
-        return resolved, relative_path
+        return _guard_for(project), relative_path
 
     def list_directory(self, project_id: str, path: str = ".") -> DirectoryListResult:
         """Return a bounded, sorted listing of a permitted directory."""
         project = self._require_project(project_id, "read")
-        directory, _ = self._resolve_existing(project, path, expected="directory")
-        relative_directory = _normalize_relative_path(_relative_text(directory, project.root))
-
-        entries: list[DirectoryEntry] = []
-        restricted_entries = 0
-        truncated = False
-        scanned = 0
+        guard, relative_directory = self._authorize_path(project, path)
 
         try:
-            with os.scandir(directory) as iterator:
-                for entry in iterator:
-                    scanned += 1
-                    if scanned > self._limits.max_directory_entries:
-                        truncated = True
-                        break
+            snapshot, truncated = guard.snapshot_directory(
+                relative_directory,
+                self._limits.max_directory_entries,
+            )
+        except PathConfinementError as exc:
+            raise _guard_error(exc) from exc
 
-                    child = Path(entry.path)
-                    child_relative = _normalize_discovered_path(child, project.root)
-                    if child_relative is None:
-                        restricted_entries += 1
-                        continue
-                    if _is_sensitive(child_relative) or entry.is_symlink():
-                        restricted_entries += 1
-                        continue
-
-                    try:
-                        is_directory = entry.is_dir(follow_symlinks=False)
-                        is_file = entry.is_file(follow_symlinks=False)
-                        if not is_directory and not is_file:
-                            restricted_entries += 1
-                            continue
-                        size = entry.stat(follow_symlinks=False).st_size if is_file else None
-                    except OSError:
-                        restricted_entries += 1
-                        continue
-
-                    entries.append(
-                        DirectoryEntry(
-                            name=entry.name,
-                            path=child_relative.as_posix(),
-                            type="directory" if is_directory else "file",
-                            size_bytes=size,
-                        )
-                    )
-        except OSError as exc:
-            raise FilesystemAccessError("Directory cannot be safely listed.") from exc
+        entries: list[DirectoryEntry] = []
+        restricted = 0
+        for entry in snapshot:
+            if entry.restricted or _is_sensitive(entry.relative_path):
+                restricted += 1
+                continue
+            entries.append(
+                DirectoryEntry(
+                    name=entry.name,
+                    path=_relative_text(entry.relative_path),
+                    type="directory" if entry.is_directory else "file",
+                    size_bytes=entry.size_bytes,
+                )
+            )
 
         entries.sort(key=lambda item: (item["type"] != "directory", item["name"].casefold()))
         return DirectoryListResult(
             project_id=project_id,
-            path=relative_directory.as_posix(),
+            path=_relative_text(relative_directory),
             entries=entries,
             truncated=truncated,
-            restricted_entries_omitted=restricted_entries,
+            restricted_entries_omitted=restricted,
         )
 
     def read_file(
@@ -390,16 +290,12 @@ class FilesystemService:
             )
 
         project = self._require_project(project_id, "read")
-        file_path, _ = self._resolve_existing(project, path, expected="file")
-
+        guard, relative_file = self._authorize_path(project, path)
         try:
-            size = file_path.stat().st_size
-        except OSError as exc:
-            raise FilesystemAccessError("File cannot be safely inspected.") from exc
-        if size > self._limits.max_read_bytes:
-            raise FilesystemAccessError("File exceeds the configured read-size limit.")
+            data = guard.read_bounded(relative_file, self._limits.max_read_bytes)
+        except PathConfinementError as exc:
+            raise _guard_error(exc) from exc
 
-        data = _read_bounded_bytes(file_path, self._limits.max_read_bytes)
         if len(data) > self._limits.max_read_bytes:
             raise FilesystemAccessError("File exceeds the configured read-size limit.")
         if b"\x00" in data:
@@ -432,7 +328,7 @@ class FilesystemService:
 
         return ReadFileResult(
             project_id=project_id,
-            path=_relative_text(file_path, project.root),
+            path=_relative_text(relative_file),
             content=content,
             start_line=start_line,
             end_line=end_line,
@@ -462,7 +358,11 @@ class FilesystemService:
             )
 
         project = self._require_project(project_id, "search")
-        start_path, _ = self._resolve_existing(project, path, expected="either")
+        guard, start_relative = self._authorize_path(project, path)
+        try:
+            start_kind = guard.kind(start_relative)
+        except PathConfinementError as exc:
+            raise _guard_error(exc) from exc
 
         matches: list[SearchMatch] = []
         files_scanned = 0
@@ -472,12 +372,12 @@ class FilesystemService:
         entries_seen = 0
         truncated = False
 
-        pending_directories: deque[Path] = deque()
-        pending_files: deque[Path] = deque()
-        if start_path.is_file():
-            pending_files.append(start_path)
+        pending_directories: deque[PurePosixPath] = deque()
+        pending_files: deque[PurePosixPath] = deque()
+        if start_kind == "file":
+            pending_files.append(start_relative)
         else:
-            pending_directories.append(start_path)
+            pending_directories.append(start_relative)
 
         needle = query if case_sensitive else query.lower()
 
@@ -485,129 +385,92 @@ class FilesystemService:
             if files_scanned >= self._limits.max_search_files:
                 truncated = True
                 break
-            if entries_seen >= self._limits.max_search_entries:
-                truncated = True
-                break
 
             if pending_files:
-                file_path = pending_files.popleft()
-            else:
-                directory = pending_directories.popleft()
-                discovered: list[tuple[str, Path, bool, bool, bool]] = []
+                file_relative = pending_files.popleft()
                 try:
-                    with os.scandir(directory) as iterator:
-                        for entry in iterator:
-                            if entries_seen >= self._limits.max_search_entries:
-                                truncated = True
-                                break
-                            entries_seen += 1
-                            try:
-                                discovered.append(
-                                    (
-                                        entry.name,
-                                        Path(entry.path),
-                                        entry.is_symlink(),
-                                        entry.is_dir(follow_symlinks=False),
-                                        entry.is_file(follow_symlinks=False),
-                                    )
-                                )
-                            except OSError:
-                                restricted += 1
-                except OSError:
-                    restricted += 1
+                    data = guard.read_bounded(file_relative, self._limits.max_search_file_bytes)
+                except PathConfinementError:
+                    skipped += 1
                     continue
 
-                discovered.sort(key=lambda item: item[0].casefold())
-                for _, candidate, is_link, is_directory, is_file in discovered:
-                    relative = _normalize_discovered_path(candidate, project.root)
-                    if relative is None or _is_sensitive(relative) or is_link:
-                        restricted += 1
-                        continue
-
-                    try:
-                        resolved = candidate.resolve(strict=True)
-                    except (OSError, RuntimeError):
-                        restricted += 1
-                        continue
-                    if not _contains_path(project.root, resolved):
-                        restricted += 1
-                        continue
-
-                    if is_directory:
-                        pending_directories.append(resolved)
-                    elif is_file:
-                        pending_files.append(resolved)
-                    else:
-                        restricted += 1
-
-                if truncated:
+                if len(data) > self._limits.max_search_file_bytes or b"\x00" in data:
+                    skipped += 1
+                    continue
+                if bytes_scanned + len(data) > self._limits.max_search_total_bytes:
+                    truncated = True
                     break
-                continue
 
-            try:
-                size = file_path.stat().st_size
-            except OSError:
-                skipped += 1
-                continue
+                try:
+                    text = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    skipped += 1
+                    continue
 
-            if size > self._limits.max_search_file_bytes:
-                skipped += 1
-                continue
-            if bytes_scanned + size > self._limits.max_search_total_bytes:
-                truncated = True
-                break
+                files_scanned += 1
+                bytes_scanned += len(data)
 
-            try:
-                data = _read_bounded_bytes(file_path, self._limits.max_search_file_bytes)
-            except FilesystemAccessError:
-                skipped += 1
-                continue
+                for line_number, line in enumerate(text.splitlines(), start=1):
+                    haystack = line if case_sensitive else line.lower()
+                    offset = 0
+                    while True:
+                        column_index = haystack.find(needle, offset)
+                        if column_index < 0:
+                            break
 
-            if len(data) > self._limits.max_search_file_bytes or b"\x00" in data:
-                skipped += 1
-                continue
-            if bytes_scanned + len(data) > self._limits.max_search_total_bytes:
-                truncated = True
-                break
-
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError:
-                skipped += 1
-                continue
-
-            files_scanned += 1
-            bytes_scanned += len(data)
-
-            for line_number, line in enumerate(text.splitlines(), start=1):
-                haystack = line if case_sensitive else line.lower()
-                offset = 0
-                while True:
-                    column_index = haystack.find(needle, offset)
-                    if column_index < 0:
-                        break
-
-                    matches.append(
-                        SearchMatch(
-                            path=_relative_text(file_path, project.root),
-                            line=line_number,
-                            column=column_index + 1,
-                            preview=_make_preview(line, column_index, len(query)),
+                        matches.append(
+                            SearchMatch(
+                                path=_relative_text(file_relative),
+                                line=line_number,
+                                column=column_index + 1,
+                                preview=_make_preview(line, column_index, len(query)),
+                            )
                         )
-                    )
-                    if len(matches) >= max_results:
-                        truncated = True
-                        break
-                    offset = column_index + max(1, len(needle))
+                        if len(matches) >= max_results:
+                            truncated = True
+                            break
+                        offset = column_index + max(1, len(needle))
 
+                    if truncated:
+                        break
                 if truncated:
                     break
-            if truncated:
+                continue
+
+            directory_relative = pending_directories.popleft()
+            remaining_entries = self._limits.max_search_entries - entries_seen
+            if remaining_entries <= 0:
+                truncated = True
+                break
+
+            try:
+                snapshot, snapshot_truncated = guard.snapshot_directory(
+                    directory_relative,
+                    remaining_entries,
+                )
+            except PathConfinementError:
+                restricted += 1
+                continue
+
+            entries_seen += len(snapshot)
+            for entry in sorted(snapshot, key=lambda item: item.name.casefold()):
+                if entry.restricted or _is_sensitive(entry.relative_path):
+                    restricted += 1
+                    continue
+                if entry.is_directory:
+                    pending_directories.append(entry.relative_path)
+                elif entry.is_file:
+                    pending_files.append(entry.relative_path)
+                else:
+                    restricted += 1
+
+            if snapshot_truncated:
+                truncated = True
                 break
 
         return SearchTextResult(
             project_id=project_id,
-            path=_relative_text(start_path, project.root),
+            path=_relative_text(start_relative),
             query=query,
             matches=matches,
             files_scanned=files_scanned,
