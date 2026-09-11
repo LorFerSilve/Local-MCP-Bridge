@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from local_mcp_bridge.registry import GitSettings, ProjectPermissions, ProjectRecord, ProjectRegistry
+from local_mcp_bridge.registry import (
+    GitSettings,
+    ProjectPermissions,
+    ProjectRecord,
+    ProjectRegistry,
+)
 from local_mcp_bridge.tools.git_service import GitError, GitFetchResult, GitService
 
 REMOTE_URL = "https://github.com/example/demo.git"
