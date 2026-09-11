@@ -9,9 +9,11 @@ arguments may contain credentials or other sensitive values.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
+import stat
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -21,10 +23,15 @@ from typing import Literal
 from typing_extensions import TypedDict
 
 from local_mcp_bridge.registry import ProjectRegistry, RegistryError
-from local_mcp_bridge.security.paths import PathConfinementError, PathGuard, normalize_relative_path
+from local_mcp_bridge.security.paths import (
+    PathConfinementError,
+    PathGuard,
+    is_redirecting_metadata,
+    normalize_relative_path,
+)
 from local_mcp_bridge.tools.execution import (
-    MAX_ARGUMENTS,
     MAX_ARGUMENT_CHARS,
+    MAX_ARGUMENTS,
     MAX_TOTAL_ARGUMENT_CHARS,
     ExecutionError,
     ExecutionService,
@@ -196,15 +203,16 @@ class JobManager:
         history_limit: int = DEFAULT_JOB_HISTORY_LIMIT,
     ) -> None:
         if type(history_limit) is not int or not 1 <= history_limit <= MAX_JOB_HISTORY_LIMIT:
-            raise JobError(
-                f"history_limit must be between 1 and {MAX_JOB_HISTORY_LIMIT}."
-            )
+            raise JobError(f"history_limit must be between 1 and {MAX_JOB_HISTORY_LIMIT}.")
 
         self._registry = registry
         self._execution = execution
         self._history_limit = history_limit
         self._jobs: dict[str, _JobRecord] = {}
-        self._state_dir = Path(state_dir).expanduser() if state_dir is not None else None
+        self._admission_lock = asyncio.Lock()
+        self._state_dir = (
+            Path(state_dir).expanduser().absolute() if state_dir is not None else None
+        )
 
         if self._state_dir is not None:
             self._prepare_state_directory()
@@ -215,11 +223,36 @@ class JobManager:
     def persistent(self) -> bool:
         return self._state_dir is not None
 
+    @staticmethod
+    def _reject_redirecting_components(path: Path) -> None:
+        """Reject symlink/junction/reparse components in the runtime-state path."""
+        absolute = path.absolute()
+        anchor = Path(absolute.anchor)
+        current = anchor
+        for part in absolute.parts[1:]:
+            current /= part
+            try:
+                metadata = os.lstat(current)
+            except OSError as exc:
+                raise JobError("Job state path cannot be safely inspected.") from exc
+            if is_redirecting_metadata(metadata):
+                raise JobError("Job state path may not contain redirecting links or reparse points.")
+
     def _prepare_state_directory(self) -> None:
         assert self._state_dir is not None
-        self._state_dir.mkdir(parents=True, exist_ok=True)
-        if not self._state_dir.is_dir():
-            raise JobError("Job state path must reference a directory.")
+        try:
+            self._state_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise JobError("Job state directory cannot be created.") from exc
+        self._reject_redirecting_components(self._state_dir)
+
+        try:
+            metadata = os.lstat(self._state_dir)
+        except OSError as exc:
+            raise JobError("Job state directory cannot be safely inspected.") from exc
+        if is_redirecting_metadata(metadata) or not stat.S_ISDIR(metadata.st_mode):
+            raise JobError("Job state path must reference a non-redirecting directory.")
+
         if os.name != "nt":
             try:
                 self._state_dir.chmod(0o700)
@@ -317,23 +350,24 @@ class JobManager:
             cwd,
             timeout_seconds,
         )
-        if self._active_job_count() >= MAX_ACTIVE_MANAGED_JOBS:
-            raise JobError("Global managed-job capacity is currently reached.")
 
-        self._prune_history_sync()
-        job_id = uuid.uuid4().hex
-        record = _JobRecord(
-            job_id=job_id,
-            project_id=project_id,
-            executable=executable,
-            cwd=safe_cwd,
-            status="starting",
-            created_at=_utc_now(),
-            argument_count=len(validated_args),
-        )
-        self._jobs[job_id] = record
+        async with self._admission_lock:
+            if self._active_job_count() >= MAX_ACTIVE_MANAGED_JOBS:
+                raise JobError("Global managed-job capacity is currently reached.")
+            self._prune_history_sync()
+            job_id = uuid.uuid4().hex
+            record = _JobRecord(
+                job_id=job_id,
+                project_id=project_id,
+                executable=executable,
+                cwd=safe_cwd,
+                status="starting",
+                created_at=_utc_now(),
+                argument_count=len(validated_args),
+            )
+            self._jobs[job_id] = record
+
         await self._persist(record)
-
         record.task = asyncio.create_task(
             self._run_job(record, validated_args, timeout_seconds),
             name=f"local-mcp-job-{job_id}",
@@ -514,10 +548,8 @@ class JobManager:
             if os.name != "nt":
                 target.chmod(0o600)
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     def _load_state(self) -> None:
         assert self._state_dir is not None
@@ -527,18 +559,22 @@ class JobManager:
                 for index, entry in enumerate(iterator):
                     if index >= MAX_STATE_FILES_TO_SCAN:
                         break
-                    if not entry.name.endswith(".job.json") or entry.is_symlink():
-                        continue
-                    if not entry.is_file(follow_symlinks=False):
+                    if not entry.name.endswith(".job.json"):
                         continue
                     job_id = entry.name.removesuffix(".job.json")
                     if not _JOB_ID_PATTERN.fullmatch(job_id):
                         continue
                     try:
-                        stat_result = entry.stat(follow_symlinks=False)
+                        metadata = entry.stat(follow_symlinks=False)
                     except OSError:
                         continue
-                    candidates.append((stat_result.st_mtime, Path(entry.path)))
+                    if (
+                        is_redirecting_metadata(metadata)
+                        or not stat.S_ISREG(metadata.st_mode)
+                        or metadata.st_nlink != 1
+                    ):
+                        continue
+                    candidates.append((metadata.st_mtime, Path(entry.path)))
         except OSError as exc:
             raise JobError("Job state directory cannot be scanned safely.") from exc
 
@@ -562,8 +598,14 @@ class JobManager:
 
     def _read_record(self, path: Path) -> _JobRecord | None:
         try:
-            size = path.stat().st_size
-            if size <= 0 or size > MAX_STATE_FILE_BYTES:
+            metadata = os.lstat(path)
+            if (
+                is_redirecting_metadata(metadata)
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_size <= 0
+                or metadata.st_size > MAX_STATE_FILE_BYTES
+            ):
                 return None
             raw = path.read_bytes()
             payload = json.loads(raw.decode("utf-8"))
@@ -635,7 +677,5 @@ class JobManager:
         for record in terminal[self._history_limit :]:
             self._jobs.pop(record.job_id, None)
             if self._state_dir is not None:
-                try:
+                with contextlib.suppress(OSError):
                     self._state_path(record.job_id).unlink(missing_ok=True)
-                except OSError:
-                    pass
