@@ -80,6 +80,25 @@ projects:
         apply_git_policy_overlay(_registry(project), overlay)
 
 
+def test_overlay_rejects_duplicate_policy_keys(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    overlay = _write_overlay(
+        tmp_path,
+        """
+projects:
+  demo:
+    remote: origin
+    remote: upstream
+    branch: main
+    remote_url: https://github.com/example/demo.git
+""",
+    )
+
+    with pytest.raises(GitConfigError, match="Duplicate Git policy key"):
+        apply_git_policy_overlay(_registry(project), overlay)
+
+
 @pytest.mark.parametrize(
     "remote_url",
     [
