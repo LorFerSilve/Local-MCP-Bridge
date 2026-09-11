@@ -13,11 +13,13 @@ explicit opt-in and should only be granted to projects whose code is trusted to 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import shutil
 import signal
 import stat
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -142,7 +144,8 @@ class ExecutionService:
             total += len(argument)
             if total > MAX_TOTAL_ARGUMENT_CHARS:
                 raise ExecutionError(
-                    f"Combined process arguments may not exceed {MAX_TOTAL_ARGUMENT_CHARS} characters."
+                    "Combined process arguments may not exceed "
+                    f"{MAX_TOTAL_ARGUMENT_CHARS} characters."
                 )
             validated.append(argument)
         return validated
@@ -220,7 +223,9 @@ class ExecutionService:
             safe_path = os.pathsep.join(safe_path_entries)
             resolved_text = shutil.which(rule.executable, path=safe_path)
             if resolved_text is None:
-                raise ExecutionError("Allowlisted executable is unavailable on the constrained PATH.")
+                raise ExecutionError(
+                    "Allowlisted executable is unavailable on the constrained PATH."
+                )
             try:
                 resolved = Path(resolved_text).resolve(strict=True)
             except (OSError, RuntimeError) as exc:
@@ -312,10 +317,8 @@ class ExecutionService:
         except (ProcessLookupError, OSError):
             pass
 
-        try:
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(process.wait(), timeout=_TERMINATION_GRACE_SECONDS)
-        except TimeoutError:
-            pass
 
     async def _collect_process(
         self,
@@ -409,7 +412,9 @@ class ExecutionService:
             guard = PathGuard(project.root)
             resolved_cwd = guard.resolve_existing(relative_cwd, expected="directory")
         except PathConfinementError as exc:
-            raise ExecutionError("Working directory is not safely confined to the project.") from exc
+            raise ExecutionError(
+                "Working directory is not safely confined to the project."
+            ) from exc
 
         resolved_executable, executable_metadata, child_path = self._resolve_executable(
             project,
@@ -442,7 +447,7 @@ class ExecutionService:
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=os.name == "posix",
                     creationflags=(
-                        getattr(__import__("subprocess"), "CREATE_NEW_PROCESS_GROUP", 0)
+                        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                         if os.name == "nt"
                         else 0
                     ),
@@ -465,8 +470,14 @@ class ExecutionService:
             finally:
                 duration_ms = max(0, round((time.monotonic() - started) * 1000))
 
-        stdout = self._redact_project_root(self._sanitize_output(bytes(capture.stdout)), project.root)
-        stderr = self._redact_project_root(self._sanitize_output(bytes(capture.stderr)), project.root)
+        stdout = self._redact_project_root(
+            self._sanitize_output(bytes(capture.stdout)),
+            project.root,
+        )
+        stderr = self._redact_project_root(
+            self._sanitize_output(bytes(capture.stderr)),
+            project.root,
+        )
         return ProcessResult(
             project_id=project_id,
             executable=rule.alias,
