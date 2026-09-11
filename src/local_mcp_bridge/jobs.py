@@ -628,7 +628,7 @@ class JobManager:
                     if (
                         is_redirecting_metadata(metadata)
                         or not stat.S_ISREG(metadata.st_mode)
-                        or metadata.st_nlink != 1
+                        or metadata.st_nlink > 1
                         or metadata.st_size <= 0
                         or metadata.st_size > MAX_STATE_FILE_BYTES
                     ):
