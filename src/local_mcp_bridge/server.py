@@ -5,6 +5,7 @@ from typing_extensions import TypedDict
 
 from local_mcp_bridge import __version__
 from local_mcp_bridge.registry import ProjectRegistry, PublicProject
+from local_mcp_bridge.tools.execution import ExecutionService, ProcessResult
 from local_mcp_bridge.tools.filesystem import (
     DEFAULT_READ_LINES,
     DEFAULT_SEARCH_RESULTS,
@@ -54,6 +55,7 @@ def create_mcp_server(
     """
     active_registry = registry if registry is not None else ProjectRegistry.empty()
     filesystem = FilesystemService(active_registry, filesystem_limits)
+    execution = ExecutionService(active_registry)
     server = MCPServer(SERVER_NAME)
 
     @server.tool()
@@ -65,7 +67,7 @@ def create_mcp_server(
             version=__version__,
             projects_configured=len(active_registry),
             filesystem_enabled=True,
-            execution_enabled=False,
+            execution_enabled=True,
         )
 
     @server.tool()
@@ -109,6 +111,23 @@ def create_mcp_server(
             path,
             case_sensitive,
             max_results,
+        )
+
+    @server.tool()
+    async def run_process(
+        project_id: str,
+        executable: str,
+        args: list[str] | None = None,
+        cwd: str = ".",
+        timeout_seconds: int | None = None,
+    ) -> ProcessResult:
+        """Run one allowlisted executable without a shell inside a confined project cwd."""
+        return await execution.run_process(
+            project_id=project_id,
+            executable=executable,
+            args=args,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
         )
 
     return server

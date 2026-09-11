@@ -1,14 +1,13 @@
 # Example configuration only. Copy to config/config.yaml for local use.
 # The real config is ignored by Git and must never be committed.
 
-# Reserved for the later HTTP/tunnel transport phase. Phase 4 still uses stdio.
+# Reserved for the later HTTP/tunnel transport phase. Phase 5 still uses stdio.
 server:
   host: "127.0.0.1"
   port: 8000
 
-# Security intent for future configurable policy. Filesystem resource ceilings and
-# Phase 4 path-confinement controls are hard-coded safe policy and cannot be
-# weakened through local configuration.
+# These security invariants are fail-closed. Phase 5 will reject a configuration
+# that attempts to disable deny-by-default policy or enable arbitrary shell access.
 security:
   deny_by_default: true
   allow_arbitrary_shell: false
@@ -16,39 +15,62 @@ security:
 projects:
   example-project:
     # Must be an existing absolute directory. The canonicalized root remains
-    # internal to the bridge and is never returned by MCP path metadata.
+    # internal to the bridge and is never returned by MCP metadata.
     root: "C:/path/to/your/project"
     permissions:
       read: true
       search: true
+      # Execution is a high-trust opt-in. An allowed program that executes project
+      # code runs with the OS privileges of the Local-MCP-Bridge process; Phase 5 is
+      # controlled execution, not a kernel sandbox.
       execute: false
       git: false
 
-    # Reserved for later execution phases. These values are not active in Phase 4.
+    # Phase 5 accepts either a simple list of command aliases or, in your ignored
+    # local config, a mapping from alias -> absolute executable path.
+    #
+    # Simple names are resolved through a constrained PATH that excludes the
+    # authorized project root. If your .venv lives inside the project, prefer a
+    # pinned local mapping such as:
+    #
+    # allowed_executables:
+    #   python: "C:/absolute/path/to/.venv/Scripts/python.exe"
+    #   pytest: "C:/absolute/path/to/.venv/Scripts/pytest.exe"
+    #
+    # Only aliases are exposed to the MCP client; pinned host paths remain private.
     allowed_executables:
       - python
-      - git
       - pytest
-    execution:
-      max_concurrent_jobs: 1
-      default_timeout_seconds: 300
+      - ruff
 
-# Active Phase 4 policy:
+    execution:
+      # Caller overrides may only reduce/choose within this bounded policy.
+      default_timeout_seconds: 60
+      max_timeout_seconds: 300
+      # Combined stdout + stderr byte ceiling. Reaching it terminates the process.
+      max_output_bytes: 262144
+      # Phase 5 one-shot process concurrency per project. Phase 6 will replace this
+      # with a persistent local job manager.
+      max_concurrent_jobs: 1
+
+# Active Phase 5 policy:
 # - Project IDs are lowercase, start with a letter, and may contain digits/hyphens.
 # - Project roots must be absolute, existing directories and may not overlap.
-# - Duplicate YAML keys and unknown project/permission keys are rejected.
+# - Duplicate YAML keys and unknown project/permission/execution keys are rejected.
 # - Permissions default to false; search=true requires read=true.
-# - Filesystem callers use project IDs plus project-relative paths only.
-# - list_directory/read_file require read=true.
-# - search_text requires both read=true and search=true.
-# - Common secret/credential paths are restricted.
-# - Symlinks, redirecting Windows reparse points/junctions and nested mount points
-#   are rejected rather than followed.
-# - Hard-linked regular files are rejected to prevent cross-root hardlink reads.
-# - File identity is verified before and after open, before content is read.
-# - Directory identity is rechecked around enumeration; recursive search
-#   re-authorizes every file immediately before reading it.
-# - Reads, listings, recursive search and result counts have hard safety limits.
-# - MCP path metadata never exposes configured absolute roots.
+# - execute=true requires a non-empty allowed_executables policy.
+# - MCP callers select an executable alias, never an arbitrary host executable path.
+# - Shell executables and a generic shell(command) capability are not available.
+# - Processes are launched directly with an argv vector; shell parsing is disabled.
+# - Working directories are project-relative and validated by Phase 4 PathGuard.
+# - Unpinned executable resolution uses a constrained PATH that excludes the project.
+# - Pinned aliases may target an explicit absolute executable in local-only config.
+# - Child processes receive a minimal environment rather than inherited credentials.
+# - stdin is disabled; runtime, argv size, output size, and concurrency are bounded.
+# - Terminal/control characters in child output are escaped before MCP return.
+# - The configured project root is redacted from returned child output where present.
+# - A timeout or output overflow terminates the launched process.
+# - Phase 4 filesystem symlink/junction/hardlink confinement remains active.
 # - If config/config.yaml is absent, the bridge starts with zero authorized projects.
-# - File modification, Git operations and process execution remain disabled.
+# - Direct filesystem modification tools and dedicated Git mutation tools remain absent.
+# - Process execution can itself modify host/project state; only enable it for trusted code.
