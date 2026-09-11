@@ -115,7 +115,11 @@ def test_filesystem_tools_work_end_to_end_without_absolute_path_leaks(tmp_path: 
     """MCP filesystem responses expose only project-relative paths and bounded content."""
     src = tmp_path / "src"
     src.mkdir()
-    (src / "main.py").write_text("def main():\n    return 'needle'\n", encoding="utf-8")
+    (src / "main.py").write_text(
+        "def main():\n    return 'needle'\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
     async def scenario() -> None:
         async with Client(create_mcp_server(_registry(tmp_path)), raise_exceptions=True) as client:
