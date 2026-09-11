@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -32,6 +33,34 @@ class GitConfigError(ValueError):
     """Raised when the local Git policy overlay is invalid."""
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate mapping keys."""
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeyLoader,
+    node: yaml.MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise GitConfigError("Git policy mapping keys must be scalar values.") from exc
+        if duplicate:
+            raise GitConfigError(f"Duplicate Git policy key: {key!r}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
 def _load_yaml(path: Path) -> object:
     try:
         size = path.stat().st_size
@@ -44,7 +73,7 @@ def _load_yaml(path: Path) -> object:
     except (OSError, UnicodeError) as exc:
         raise GitConfigError(f"Cannot read Git policy file: {path}") from exc
     try:
-        return yaml.safe_load(text)
+        return yaml.load(text, Loader=_UniqueKeyLoader)
     except yaml.YAMLError as exc:
         raise GitConfigError("Git policy file is not valid YAML.") from exc
 
