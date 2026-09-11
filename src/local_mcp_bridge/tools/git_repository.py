@@ -25,12 +25,16 @@ _DANGEROUS_PREFIXES = (
 _DANGEROUS_EXACT = {
     "core.alternaterefscommand",
     "core.attributesfile",
+    "core.bare",
     "core.excludesfile",
     "core.fsmonitor",
     "core.gitproxy",
     "core.hookspath",
     "core.sshcommand",
+    "core.worktree",
     "diff.external",
+    "extensions.partialclone",
+    "extensions.worktreeconfig",
     "interactive.difffilter",
 }
 
@@ -101,6 +105,30 @@ class GitRepository:
         if is_redirecting_metadata(metadata) or not stat.S_ISDIR(metadata.st_mode):
             raise GitRepositoryError("Git metadata contains a redirecting directory.")
 
+    @staticmethod
+    def _reject_metadata_redirect_file(path: Path, message: str) -> None:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise GitRepositoryError("Git metadata cannot be safely inspected.") from exc
+        raise GitRepositoryError(message)
+
+    def _validate_remote_ref_directories(self, dot_git: Path) -> None:
+        current = dot_git / "refs"
+        parts = ("remotes", self.settings.remote, *Path(self.settings.branch).parts[:-1])
+        for part in parts:
+            current /= part
+            try:
+                metadata = os.lstat(current)
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                raise GitRepositoryError("Git remote-ref path cannot be safely inspected.") from exc
+            if is_redirecting_metadata(metadata) or not stat.S_ISDIR(metadata.st_mode):
+                raise GitRepositoryError("Git remote-ref path contains a redirecting component.")
+
     def _validate_metadata_layout(self) -> None:
         dot_git = self.project.root / ".git"
         self._safe_metadata_directory(dot_git)
@@ -109,19 +137,20 @@ class GitRepository:
         self._safe_metadata_file(dot_git / "HEAD")
         self._safe_metadata_file(dot_git / "config")
         self._safe_metadata_file(dot_git / "index", optional=True)
+        self._safe_metadata_file(dot_git / "packed-refs", optional=True)
+        self._safe_metadata_file(dot_git / "ORIG_HEAD", optional=True)
+        self._validate_remote_ref_directories(dot_git)
 
-        alternates = dot_git / "objects" / "info" / "alternates"
-        try:
-            os.lstat(alternates)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            raise GitRepositoryError("Git object alternates cannot be safely inspected.") from exc
-        else:
-            raise GitRepositoryError("External Git object alternates are not supported.")
+        self._reject_metadata_redirect_file(
+            dot_git / "objects" / "info" / "alternates",
+            "External Git object alternates are not supported.",
+        )
+        self._reject_metadata_redirect_file(
+            dot_git / "commondir",
+            "Git common-directory indirection is not supported in Phase 7.",
+        )
 
-    @staticmethod
-    def _config_key_is_dangerous(key: str) -> bool:
+    def _config_key_is_dangerous(self, key: str) -> bool:
         normalized = key.casefold()
         if normalized in _DANGEROUS_EXACT:
             return True
@@ -129,9 +158,14 @@ class GitRepository:
             return True
         if normalized.startswith(("merge.", "http.", "protocol.")):
             return True
-        return normalized.startswith("remote.") and normalized.endswith(
-            (".proxy", ".uploadpack", ".receivepack", ".vcs")
-        )
+        if normalized.startswith("branch.") and normalized.endswith(".mergeoptions"):
+            return True
+        if normalized.startswith("remote."):
+            allowed_remote_prefix = f"remote.{self.settings.remote.casefold()}."
+            if not normalized.startswith(allowed_remote_prefix):
+                return True
+            return not normalized.endswith((".url", ".fetch"))
+        return False
 
     async def _validate_local_config(self) -> None:
         result = await self.run(
@@ -153,7 +187,8 @@ class GitRepository:
         )
         if remote.returncode != 0:
             raise GitRepositoryError("Configured Git remote is missing from the repository.")
-        urls = [line for line in remote.stdout.decode("utf-8", errors="replace").splitlines() if line]
+        decoded = remote.stdout.decode("utf-8", errors="replace").splitlines()
+        urls = [line for line in decoded if line]
         if urls != [self.settings.remote_url]:
             raise GitRepositoryError(
                 "Repository remote URL does not match the trusted Phase 7 policy."
@@ -226,7 +261,6 @@ class GitRepository:
             else:
                 staged += int(x != " ")
                 unstaged += int(y != " ")
-            if x in {"R", "C"} or y in {"R", "C"}:
-                if index < len(records):
-                    index += 1
+            if (x in {"R", "C"} or y in {"R", "C"}) and index < len(records):
+                index += 1
         return staged, unstaged, untracked
