@@ -460,9 +460,12 @@ class ExecutionService:
             project_id,
             asyncio.Semaphore(project.execution.max_concurrent_jobs),
         )
-        capture = _OutputCapture(remaining=project.execution.max_output_bytes)
+        if semaphore.locked():
+            raise ExecutionError("Project execution concurrency limit is currently reached.")
 
-        async with semaphore:
+        await semaphore.acquire()
+        try:
+            capture = _OutputCapture(remaining=project.execution.max_output_bytes)
             started = time.monotonic()
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -497,6 +500,8 @@ class ExecutionService:
                     raise
             finally:
                 duration_ms = max(0, round((time.monotonic() - started) * 1000))
+        finally:
+            semaphore.release()
 
         stdout = self._redact_project_root(
             self._sanitize_output(bytes(capture.stdout)),
