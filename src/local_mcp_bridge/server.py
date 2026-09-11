@@ -1,10 +1,9 @@
-"""MCP server entry point for Local-MCP-Bridge."""
+"""Pure MCP server factory for Local-MCP-Bridge."""
 
 from mcp.server import MCPServer
 from typing_extensions import TypedDict
 
 from local_mcp_bridge import __version__
-from local_mcp_bridge.config import load_runtime_registry
 from local_mcp_bridge.registry import ProjectRegistry, PublicProject
 from local_mcp_bridge.tools.filesystem import (
     DEFAULT_READ_LINES,
@@ -47,7 +46,12 @@ def create_mcp_server(
     registry: ProjectRegistry | None = None,
     filesystem_limits: FilesystemLimits | None = None,
 ) -> MCPServer:
-    """Create a bridge server bound to an immutable project registry."""
+    """Create a bridge server bound to an explicitly supplied registry.
+
+    This factory intentionally does not read local runtime configuration. That
+    keeps imports deterministic and makes unit tests independent of a user's
+    machine-specific ``config/config.yaml``.
+    """
     active_registry = registry if registry is not None else ProjectRegistry.empty()
     filesystem = FilesystemService(active_registry, filesystem_limits)
     server = MCPServer(SERVER_NAME)
@@ -108,15 +112,3 @@ def create_mcp_server(
         )
 
     return server
-
-
-mcp = create_mcp_server(load_runtime_registry())
-
-
-def main() -> None:
-    """Run the bridge over MCP's local stdio transport."""
-    mcp.run()
-
-
-if __name__ == "__main__":
-    main()

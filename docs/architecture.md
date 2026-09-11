@@ -14,6 +14,14 @@ MCP client / AI agent
         | MCP tool calls
         v
 +---------------------------+
+| Runtime composition root  |
+| - loads local config      |
+| - builds ProjectRegistry  |
+| - creates MCP server      |
++-------------+-------------+
+              |
+              v
++---------------------------+
 | MCP tool layer            |
 | - project metadata        |
 | - list_directory          |
@@ -53,6 +61,7 @@ src/local_mcp_bridge/
 ├── __main__.py
 ├── config.py
 ├── registry.py
+├── runtime.py
 ├── server.py
 └── tools/
     ├── __init__.py
@@ -65,7 +74,36 @@ src/local_mcp_bridge/
 
 `tools/filesystem.py` implements the Phase 3 read-only policy: relative-path validation, common secret-path denial, standard symlink rejection, canonical root containment, bounded UTF-8 reads, bounded directory listing, and bounded plain-text recursive search.
 
-`server.py` binds those deterministic capabilities to MCP tools. It does not perform filesystem authorization itself.
+`server.py` is a pure MCP server factory. Importing it does not inspect the host, read `config/config.yaml`, or depend on environment-selected runtime configuration. Callers and tests must explicitly inject a registry when they need projects.
+
+`runtime.py` is the composition root. It intentionally loads the machine-local runtime registry and creates the real configured MCP server. CLI execution and MCP Inspector usage target this module.
+
+`__main__.py` delegates to the runtime composition root so `python -m local_mcp_bridge` retains normal local-config behavior.
+
+## Test/runtime isolation boundary
+
+Machine-local configuration must not participate in unit-test collection.
+
+```text
+pytest
+  |
+  +--> import local_mcp_bridge.server
+  |       |
+  |       +--> pure factory, empty registry unless explicitly injected
+  |
+  +--> temporary test registries / tmp_path fixtures
+
+real runtime
+  |
+  +--> local_mcp_bridge.runtime
+          |
+          +--> load_runtime_registry()
+          +--> config/config.yaml or explicit override
+```
+
+This means a developer can have a malformed, stale, machine-specific, or temporarily unavailable local project entry without making unrelated unit tests impossible to collect. The runtime still fails closed when an explicitly selected configuration is invalid.
+
+A regression test launches a fresh Python subprocess with `LOCAL_MCP_BRIDGE_CONFIG` pointing to a missing file and verifies that importing `local_mcp_bridge.server` succeeds while importing `local_mcp_bridge.runtime` fails closed. This guards against accidentally reintroducing import-time configuration coupling.
 
 ## Project identity boundary
 
@@ -172,7 +210,7 @@ config/config.yaml           local only
 .env                         local only
 ```
 
-No local config produces an empty registry. An explicitly selected invalid/missing config fails closed.
+No local config produces an empty runtime registry. An explicitly selected invalid/missing config fails closed. Pure server-factory imports do not load either form.
 
 ## Future capability design
 

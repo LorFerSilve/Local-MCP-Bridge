@@ -22,6 +22,7 @@ Core rules:
 - **Bounded output and scanning.** Reads, listings, recursive search, query length, and search results have hard safety limits.
 - **No unrestricted shell.** Command execution is not implemented yet and future execution will use narrow allowlisted operations.
 - **Local secrets stay local.** Real configuration, credentials, logs, runtime state, and machine-specific paths remain untracked.
+- **Hermetic tests.** Importing the reusable MCP server factory never reads machine-local runtime configuration.
 
 See [`docs/security-model.md`](docs/security-model.md) and [`docs/threat-model.md`](docs/threat-model.md).
 
@@ -46,6 +47,7 @@ Local-MCP-Bridge/
 │       ├── __main__.py
 │       ├── config.py
 │       ├── registry.py
+│       ├── runtime.py
 │       ├── server.py
 │       └── tools/
 │           ├── __init__.py
@@ -53,6 +55,7 @@ Local-MCP-Bridge/
 ├── tests/
 │   ├── test_filesystem.py
 │   ├── test_registry.py
+│   ├── test_runtime_isolation.py
 │   └── test_server.py
 ├── .env.example
 ├── .gitignore
@@ -80,17 +83,21 @@ python -m ruff check .
 python -m pytest -q
 ```
 
-Start the MCP server over stdio:
+The pytest suite is intentionally isolated from `config/config.yaml`: tests inject their own temporary registries and importing `local_mcp_bridge.server` performs no local-config I/O. A broken or machine-specific local config therefore cannot break test collection.
+
+Start the real MCP server over stdio:
 
 ```powershell
 python -m local_mcp_bridge
 ```
 
-For interactive development with the MCP Inspector:
+For interactive development with the MCP Inspector, target the runtime-wired module so the Inspector sees your configured projects:
 
 ```powershell
-mcp dev src/local_mcp_bridge/server.py
+mcp dev src/local_mcp_bridge/runtime.py
 ```
+
+`server.py` contains the pure reusable server factory. `runtime.py` is the explicit composition root that loads machine-local configuration.
 
 ## Configure authorized projects
 
@@ -122,7 +129,7 @@ $env:LOCAL_MCP_BRIDGE_CONFIG = "C:/absolute/path/to/local-config.yaml"
 python -m local_mcp_bridge
 ```
 
-With no local configuration, the bridge starts fail-closed with zero authorized projects.
+With no local configuration, the bridge starts fail-closed with zero authorized projects. An explicitly selected invalid configuration fails closed.
 
 ## Phase 3: safe filesystem tools
 
@@ -210,7 +217,7 @@ Never commit real API keys, authentication tokens, tunnel credentials, private c
 
 ## Current status
 
-**Phase 3 — safe read-only filesystem tools implemented.**
+**Phase 3 — safe read-only filesystem tools implemented, with hermetic pytest/runtime configuration isolation.**
 
 The bridge can now inspect authorized project files but still cannot modify files or execute local commands.
 
