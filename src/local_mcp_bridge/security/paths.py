@@ -173,7 +173,8 @@ class PathGuard:
         if not _contains_path(self.root, resolved):
             raise PathConfinementError("Requested path escapes the authorized project root.")
 
-        _reject_redirecting_components(self.root, normalize_relative_path(_relative_text(resolved, self.root)))
+        resolved_relative = normalize_relative_path(_relative_text(resolved, self.root))
+        _reject_redirecting_components(self.root, resolved_relative)
         metadata = _lstat(resolved)
         if is_redirecting_metadata(metadata):
             raise PathConfinementError("Redirecting link/reparse paths are not allowed.")
@@ -236,16 +237,27 @@ class PathGuard:
         finally:
             os.close(descriptor)
 
-    def snapshot_directory(self, relative_path: PurePosixPath) -> list[GuardedEntry]:
-        """Capture one directory snapshot and reject identity changes around enumeration."""
+    def snapshot_directory(
+        self,
+        relative_path: PurePosixPath,
+        max_entries: int,
+    ) -> tuple[list[GuardedEntry], bool]:
+        """Capture a bounded directory snapshot and verify its identity around enumeration."""
+        if max_entries < 1:
+            raise PathConfinementError("Directory snapshot limit must be positive.")
+
         resolved = self.resolve_existing(relative_path, expected="directory")
         before = _lstat(resolved)
         expected_identity = file_identity(before)
         captured: list[GuardedEntry] = []
+        truncated = False
 
         try:
             with os.scandir(resolved) as iterator:
                 for entry in iterator:
+                    if len(captured) >= max_entries:
+                        truncated = True
+                        break
                     child_relative = normalize_relative_path(
                         str(relative_path / entry.name).replace("\\", "/")
                     )
@@ -288,4 +300,4 @@ class PathGuard:
         if after_resolved != resolved or file_identity(after) != expected_identity:
             raise PathConfinementError("Directory identity changed during enumeration.")
 
-        return captured
+        return captured, truncated
