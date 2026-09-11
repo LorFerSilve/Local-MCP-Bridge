@@ -4,35 +4,24 @@ A security-scoped Model Context Protocol (MCP) bridge for controlled local files
 
 ## Purpose
 
-Local-MCP-Bridge is intended to let an MCP-compatible AI client interact with explicitly authorized local development projects without granting unrestricted access to the host machine.
+Local-MCP-Bridge lets an MCP-compatible AI client interact with explicitly authorized local development projects without granting unrestricted access to the host machine.
 
-The bridge is designed around two primary capability groups:
-
-- **Filesystem access** — list, search, inspect, and read files inside configured project roots.
-- **Controlled execution** — run approved development commands and scripts with bounded working directories, timeouts, output limits, and audit logging.
-
-The long-term goal is to support workflows such as:
-
-1. An AI agent modifies code through GitHub or another source-control integration.
-2. The local bridge synchronizes the selected repository.
-3. The bridge starts a benchmark, test suite, build, or other approved development task locally.
-4. The AI agent reads structured results and logs through MCP.
-5. The agent uses those results to decide whether further code changes are required.
+The project is being built in layers: first project authorization, then read-only filesystem access, then hardened path handling, controlled execution, managed jobs, Git synchronization, audit logging, and finally remote MCP integration.
 
 ## Security model
 
-This project treats every MCP client, model-generated tool call, repository file, and command argument as potentially untrusted input.
+The bridge treats the MCP client, model-generated tool calls, repository content, paths, search queries, future command arguments, and process output as untrusted input.
 
 Core rules:
 
-- **Deny by default.** No filesystem root or executable is available unless explicitly configured.
-- **No unrestricted shell by default.** The bridge should expose narrow capabilities rather than arbitrary `cmd.exe`, PowerShell, or shell command strings.
-- **Project-root confinement.** Filesystem operations and process working directories must remain inside canonicalized, explicitly allowed roots.
-- **Escape protection.** Path traversal, symbolic-link, junction, and reparse-point escape paths must be validated before access.
-- **Least privilege.** Read, execution, Git, and future write permissions are separate capabilities.
-- **Bounded execution.** Commands use timeouts, output limits, and resource-aware job handling.
-- **Local secrets stay local.** Real configuration, tokens, credentials, logs, job state, and machine-specific paths are excluded from Git.
-- **Auditable actions.** Security-relevant operations should produce local audit records without leaking secrets.
+- **Deny by default.** No project is available unless explicitly configured.
+- **Project IDs instead of host paths.** The client addresses a logical project ID; absolute roots remain local to the bridge.
+- **Project-root confinement.** Filesystem operations must resolve inside the selected registered root.
+- **Read/search permissions are separate.** Capabilities are enforced locally, not by trusting the model.
+- **Sensitive paths are restricted.** Common credential stores, `.env` files, private-key formats, `.git`, and similar paths are not exposed by Phase 3 tools.
+- **Bounded output and scanning.** Reads, listings, recursive search, query length, and search results have hard safety limits.
+- **No unrestricted shell.** Command execution is not implemented yet and future execution will use narrow allowlisted operations.
+- **Local secrets stay local.** Real configuration, credentials, logs, runtime state, and machine-specific paths remain untracked.
 
 See [`docs/security-model.md`](docs/security-model.md) and [`docs/threat-model.md`](docs/threat-model.md).
 
@@ -57,8 +46,12 @@ Local-MCP-Bridge/
 │       ├── __main__.py
 │       ├── config.py
 │       ├── registry.py
-│       └── server.py
+│       ├── server.py
+│       └── tools/
+│           ├── __init__.py
+│           └── filesystem.py
 ├── tests/
+│   ├── test_filesystem.py
 │   ├── test_registry.py
 │   └── test_server.py
 ├── .env.example
@@ -80,7 +73,7 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-Run the linter and tests:
+Run validation:
 
 ```powershell
 python -m ruff check .
@@ -99,32 +92,20 @@ For interactive development with the MCP Inspector:
 mcp dev src/local_mcp_bridge/server.py
 ```
 
-## Phase 2: project registry and allowed roots
+## Configure authorized projects
 
-Phase 2 introduces the local project registry that separates MCP-facing project identifiers from host-specific absolute paths.
-
-The server exposes three non-destructive metadata tools:
-
-- `health_check` — returns server/version status and the number of configured projects;
-- `list_projects` — returns configured project IDs and their capability flags;
-- `get_project` — returns public metadata for one project ID.
-
-Absolute local roots are never included in MCP responses.
-
-### Configure a local project
-
-Copy the tracked example configuration to the ignored local configuration file:
+Copy the tracked example configuration to the ignored local file:
 
 ```powershell
 Copy-Item config/config.example.yaml config/config.yaml
 ```
 
-Then edit `config/config.yaml`, for example:
+Then configure only directories you explicitly want the bridge to know about:
 
 ```yaml
 projects:
-  aurum:
-    root: "C:/path/to/aurum-forecasting-tool"
+  example-project:
+    root: "C:/absolute/path/to/example-project"
     permissions:
       read: true
       search: true
@@ -132,36 +113,60 @@ projects:
       git: false
 ```
 
-The root must already exist and must be an absolute directory path.
+The configured root must already exist and be an absolute directory path. `config/config.yaml` is ignored by Git.
 
-You may also select a different local config file with:
+You can select another local configuration file with:
 
 ```powershell
-$env:LOCAL_MCP_BRIDGE_CONFIG = "C:/path/to/local-config.yaml"
+$env:LOCAL_MCP_BRIDGE_CONFIG = "C:/absolute/path/to/local-config.yaml"
 python -m local_mcp_bridge
 ```
 
-If no `config/config.yaml` exists and no override is supplied, the bridge starts safely with **zero authorized projects**.
+With no local configuration, the bridge starts fail-closed with zero authorized projects.
 
-### Registry invariants
+## Phase 3: safe filesystem tools
 
-Phase 2 enforces the following before a root enters the registry:
+Phase 3 adds the first local-content capabilities. They are read-only and project-scoped:
 
-- project IDs must start with a lowercase letter and contain only lowercase letters, digits, and hyphens;
-- roots must be absolute, existing directories;
-- roots are canonicalized with strict resolution;
-- duplicate YAML keys are rejected;
-- the same canonical root cannot be registered under multiple IDs;
-- permissions default to `false` when omitted;
-- `search: true` requires `read: true`;
-- unknown project and permission keys are rejected;
-- MCP-visible metadata never contains the local absolute root.
+- `list_directory(project_id, path=".")` — returns a bounded directory listing using project-relative paths;
+- `read_file(project_id, path, start_line=1, max_lines=400)` — reads a bounded UTF-8 text slice;
+- `search_text(project_id, query, path=".", case_sensitive=false, max_results=50)` — performs bounded plain-text search without regex evaluation.
 
-Filesystem content access and command execution remain intentionally disabled in Phase 2.
+Metadata tools from Phase 2 remain available:
+
+- `health_check`;
+- `list_projects`;
+- `get_project`.
+
+### Active Phase 3 safeguards
+
+Before filesystem content is returned, the bridge applies the following controls:
+
+- only registered projects may be selected;
+- `read` permission is required for listing and reading;
+- both `read` and `search` are required for recursive text search;
+- caller paths must be relative to the project root;
+- absolute POSIX paths, Windows drive paths, UNC paths, `..` traversal, NTFS alternate-data-stream syntax, control characters, and Windows device names are rejected;
+- the effective path is resolved and must remain inside the canonical project root;
+- standard symbolic-link path components are rejected;
+- common credential and secret paths are denied by default;
+- binary/non-UTF-8 files are not returned through `read_file`;
+- file reads are bounded at the file descriptor rather than trusting a prior file-size check;
+- directory and recursive-search traversal is bounded;
+- search is plain substring matching, avoiding regex/ReDoS behavior;
+- MCP path fields remain project-relative and do not disclose the configured absolute root.
+
+`read_file` is intentionally line-paged. If a file contains more lines than the requested slice, the response includes `next_start_line` so a client can continue without loading the whole file into context.
+
+### Deliberate Phase 3 limitations
+
+Phase 3 does **not** add filesystem writes, deletes, renames, Git operations, shell access, or process execution.
+
+It also does not yet claim complete Windows reparse-point/TOCTOU hardening. Phase 4 is dedicated to deeper symlink, junction, reparse-point, and race-resistant path confinement before execution capabilities are introduced.
 
 ## Configuration policy
 
-Only example configuration belongs in Git.
+Only templates belong in Git.
 
 Tracked:
 
@@ -186,14 +191,14 @@ output/
 artifacts/
 ```
 
-Never place real API keys, authentication tokens, tunnel credentials, private certificates, personal absolute paths, or sensitive benchmark output in committed configuration.
+Never commit real API keys, authentication tokens, tunnel credentials, private certificates, personal machine configuration, or sensitive benchmark output.
 
-## Planned development phases
+## Development phases
 
-- **Phase 0:** Repository and security baseline
-- **Phase 1:** Minimal MCP server
-- **Phase 2:** Project registry and allowed roots
-- **Phase 3:** Safe filesystem tools
+- **Phase 0:** Repository and security baseline — complete
+- **Phase 1:** Minimal MCP server — complete
+- **Phase 2:** Project registry and allowed roots — complete
+- **Phase 3:** Safe filesystem tools — complete
 - **Phase 4:** Path/symlink/junction confinement
 - **Phase 5:** Controlled process execution
 - **Phase 6:** Persistent local job manager
@@ -205,13 +210,13 @@ Never place real API keys, authentication tokens, tunnel credentials, private ce
 
 ## Current status
 
-**Phase 2 — project registry and allowed roots implemented.**
+**Phase 3 — safe read-only filesystem tools implemented.**
 
-The bridge can now load and expose safe project metadata, but it still cannot read project files or execute local commands. Those capabilities remain gated behind later security phases.
+The bridge can now inspect authorized project files but still cannot modify files or execute local commands.
 
 ## Contributing
 
-Security properties take precedence over convenience. Changes that broaden filesystem, command, network, or credential access should include explicit threat analysis and tests for denial/escape cases.
+Security properties take precedence over convenience. Changes that broaden filesystem, command, network, or credential access should include explicit threat analysis and denial/escape tests.
 
 ## License
 

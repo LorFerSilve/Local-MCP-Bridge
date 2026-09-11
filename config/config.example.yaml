@@ -1,21 +1,22 @@
 # Example configuration only. Copy to config/config.yaml for local use.
 # The real config is ignored by Git and must never be committed.
 
+# Reserved for the later HTTP/tunnel transport phase. Phase 3 still uses stdio.
 server:
   host: "127.0.0.1"
   port: 8000
 
+# Security intent for future configurable policy. Phase 3 filesystem resource
+# ceilings are currently hard-coded safe upper bounds and cannot be increased
+# through local configuration.
 security:
   deny_by_default: true
-  max_read_bytes: 1048576
-  max_output_bytes: 1048576
-  default_command_timeout_seconds: 300
   allow_arbitrary_shell: false
 
 projects:
   example-project:
     # Must be an existing absolute directory. The canonicalized root remains
-    # internal to the bridge and is never returned by MCP metadata tools.
+    # internal to the bridge and is never returned by MCP path metadata.
     root: "C:/path/to/your/project"
     permissions:
       read: true
@@ -23,7 +24,7 @@ projects:
       execute: false
       git: false
 
-    # Reserved for later execution phases. These values are not active in Phase 2.
+    # Reserved for later execution phases. These values are not active in Phase 3.
     allowed_executables:
       - python
       - git
@@ -32,14 +33,16 @@ projects:
       max_concurrent_jobs: 1
       default_timeout_seconds: 300
 
-# Phase 2 policy:
+# Active Phase 3 policy:
 # - Project IDs are lowercase, start with a letter, and may contain digits/hyphens.
-# - Project roots must be absolute, existing directories.
-# - Roots are canonicalized before registration.
-# - Registered roots may not be identical or nested inside one another.
-# - Duplicate YAML keys are rejected instead of silently overwritten.
-# - Permissions default to false when omitted.
-# - search=true requires read=true.
-# - MCP metadata exposes IDs and capability flags, never local absolute roots.
+# - Project roots must be absolute, existing directories and may not overlap.
+# - Duplicate YAML keys and unknown project/permission keys are rejected.
+# - Permissions default to false; search=true requires read=true.
+# - Filesystem callers use project IDs plus project-relative paths only.
+# - list_directory/read_file require read=true.
+# - search_text requires both read=true and search=true.
+# - Common secret/credential paths and standard symlink paths are restricted.
+# - Reads, listings, recursive search and result counts have hard safety limits.
+# - MCP path metadata never exposes configured absolute roots.
 # - If config/config.yaml is absent, the bridge starts with zero authorized projects.
-# - Filesystem content access and command execution remain disabled until later phases.
+# - File modification, Git operations and process execution remain disabled.
