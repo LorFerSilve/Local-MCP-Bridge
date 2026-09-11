@@ -48,6 +48,9 @@ DEFAULT_OUTPUT_CHARS = 32_768
 MAX_OUTPUT_CHARS = 131_072
 MAX_STATE_FILES_TO_SCAN = 1_024
 MAX_STATE_FILE_BYTES = 8 * 1024 * 1024
+MAX_RECOVERY_BYTES = 64 * 1024 * 1024
+MAX_RECOVERED_OUTPUT_CHARS = 4 * 1024 * 1024
+MAX_RECOVERED_ERROR_CHARS = 2_048
 
 _JOB_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _ACTIVE_STATUSES = {"starting", "running", "cancelling"}
@@ -59,6 +62,7 @@ _TERMINAL_STATUSES = {
     "output_limit",
     "interrupted",
 }
+_TERMINATION_REASONS = {"exited", "timeout", "output_limit", "cancelled", "bridge_restart"}
 
 JobStatus = Literal[
     "starting",
@@ -132,6 +136,43 @@ def _normalize_cwd(raw: str) -> tuple[str, PurePosixPath]:
         raise JobError("Working directory is not a valid project-relative path.") from exc
     text = "." if normalized.parts == (".",) else normalized.as_posix()
     return text, normalized
+
+
+def _is_runtime_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or len(value) > 40:
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError:
+        return False
+    return True
+
+
+def _sanitize_recovered_text(text: str, root: Path) -> str:
+    sanitized: list[str] = []
+    for character in text:
+        codepoint = ord(character)
+        if character in ("\n", "\r", "\t") or (
+            codepoint >= 32 and not 127 <= codepoint <= 159
+        ):
+            sanitized.append(character)
+        else:
+            sanitized.append(f"\\x{codepoint:02x}")
+
+    result = "".join(sanitized)
+    variants = {
+        str(root),
+        root.as_posix(),
+        str(root).replace("\\", "/"),
+        str(root).replace("/", "\\"),
+    }
+    variants.discard("")
+    for variant in sorted(variants, key=len, reverse=True):
+        if os.name == "nt":
+            result = re.sub(re.escape(variant), "<project-root>", result, flags=re.IGNORECASE)
+        else:
+            result = result.replace(variant, "<project-root>")
+    return result
 
 
 @dataclass(slots=True)
@@ -241,19 +282,34 @@ class JobManager:
 
     def _prepare_state_directory(self) -> None:
         assert self._state_dir is not None
-        try:
-            self._state_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise JobError("Job state directory cannot be created.") from exc
+        absolute = self._state_dir.absolute()
+        if not absolute.anchor:
+            raise JobError("Job state directory must resolve to an absolute path.")
+
+        current = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
+            current /= part
+            try:
+                metadata = os.lstat(current)
+            except FileNotFoundError:
+                try:
+                    current.mkdir(mode=0o700)
+                except FileExistsError:
+                    pass
+                except OSError as exc:
+                    raise JobError("Job state directory cannot be created.") from exc
+                try:
+                    metadata = os.lstat(current)
+                except OSError as exc:
+                    raise JobError("Job state path cannot be safely inspected.") from exc
+            except OSError as exc:
+                raise JobError("Job state path cannot be safely inspected.") from exc
+
+            if is_redirecting_metadata(metadata) or not stat.S_ISDIR(metadata.st_mode):
+                raise JobError("Job state path must contain only non-redirecting directories.")
+
+        self._state_dir = absolute
         self._reject_redirecting_components(self._state_dir)
-
-        try:
-            metadata = os.lstat(self._state_dir)
-        except OSError as exc:
-            raise JobError("Job state directory cannot be safely inspected.") from exc
-        if is_redirecting_metadata(metadata) or not stat.S_ISDIR(metadata.st_mode):
-            raise JobError("Job state path must reference a non-redirecting directory.")
-
         if os.name != "nt":
             try:
                 self._state_dir.chmod(0o700)
@@ -554,7 +610,7 @@ class JobManager:
 
     def _load_state(self) -> None:
         assert self._state_dir is not None
-        candidates: list[tuple[float, Path]] = []
+        candidates: list[tuple[float, int, Path]] = []
         try:
             with os.scandir(self._state_dir) as iterator:
                 for index, entry in enumerate(iterator):
@@ -573,14 +629,22 @@ class JobManager:
                         is_redirecting_metadata(metadata)
                         or not stat.S_ISREG(metadata.st_mode)
                         or metadata.st_nlink != 1
+                        or metadata.st_size <= 0
+                        or metadata.st_size > MAX_STATE_FILE_BYTES
                     ):
                         continue
-                    candidates.append((metadata.st_mtime, Path(entry.path)))
+                    candidates.append((metadata.st_mtime, metadata.st_size, Path(entry.path)))
         except OSError as exc:
             raise JobError("Job state directory cannot be scanned safely.") from exc
 
         candidates.sort(key=lambda item: item[0], reverse=True)
-        for _, path in candidates[: self._history_limit]:
+        attempted_bytes = 0
+        for _, size_bytes, path in candidates:
+            if len(self._jobs) >= self._history_limit:
+                break
+            if attempted_bytes + size_bytes > MAX_RECOVERY_BYTES:
+                break
+            attempted_bytes += size_bytes
             record = self._read_record(path)
             if record is not None:
                 self._jobs[record.job_id] = record
@@ -598,19 +662,14 @@ class JobManager:
                     record.persistent = False
 
     def _read_record(self, path: Path) -> _JobRecord | None:
+        assert self._state_dir is not None
         try:
-            metadata = os.lstat(path)
-            if (
-                is_redirecting_metadata(metadata)
-                or not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_nlink != 1
-                or metadata.st_size <= 0
-                or metadata.st_size > MAX_STATE_FILE_BYTES
-            ):
+            relative_path = normalize_relative_path(path.name)
+            raw = PathGuard(self._state_dir).read_bounded(relative_path, MAX_STATE_FILE_BYTES)
+            if not raw or len(raw) > MAX_STATE_FILE_BYTES:
                 return None
-            raw = path.read_bytes()
             payload = json.loads(raw.decode("utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
+        except (PathConfinementError, UnicodeError, json.JSONDecodeError):
             return None
         if not isinstance(payload, dict) or payload.get("schema_version") != JOB_SCHEMA_VERSION:
             return None
@@ -632,27 +691,56 @@ class JobManager:
             return None
         if path.name != f"{job_id}.job.json":
             return None
-        if not all(isinstance(value, str) for value in (project_id, executable, cwd, created_at)):
+        if not all(isinstance(value, str) for value in (project_id, executable, cwd)):
             return None
+        try:
+            project = self._registry.require(project_id)
+            if not project.permissions.execute:
+                return None
+            project.require_executable(executable)
+        except RegistryError:
+            return None
+        try:
+            normalized_cwd = normalize_relative_path(cwd)
+        except PathConfinementError:
+            return None
+        cwd = "." if normalized_cwd.parts == (".",) else normalized_cwd.as_posix()
+
         if status not in _ACTIVE_STATUSES | _TERMINAL_STATUSES:
+            return None
+        if not _is_runtime_timestamp(created_at):
             return None
         if type(argument_count) is not int or not 0 <= argument_count <= MAX_ARGUMENTS:
             return None
         if not isinstance(stdout, str) or not isinstance(stderr, str):
             return None
+        if len(stdout) + len(stderr) > MAX_RECOVERED_OUTPUT_CHARS:
+            return None
 
-        optional_strings = ("started_at", "finished_at", "termination_reason", "error")
-        for key in optional_strings:
-            value = payload.get(key)
-            if value is not None and not isinstance(value, str):
-                return None
+        started_at = payload.get("started_at")
+        finished_at = payload.get("finished_at")
+        if started_at is not None and not _is_runtime_timestamp(started_at):
+            return None
+        if finished_at is not None and not _is_runtime_timestamp(finished_at):
+            return None
+
+        termination_reason = payload.get("termination_reason")
+        if termination_reason is not None and termination_reason not in _TERMINATION_REASONS:
+            return None
         exit_code = payload.get("exit_code")
         if exit_code is not None and type(exit_code) is not int:
             return None
         output_truncated = payload.get("output_truncated", False)
         if not isinstance(output_truncated, bool):
             return None
+        error = payload.get("error")
+        if error is not None:
+            if not isinstance(error, str) or len(error) > MAX_RECOVERED_ERROR_CHARS:
+                return None
+            error = _sanitize_recovered_text(error, project.root)
 
+        stdout = _sanitize_recovered_text(stdout, project.root)
+        stderr = _sanitize_recovered_text(stderr, project.root)
         return _JobRecord(
             job_id=job_id,
             project_id=project_id,
@@ -661,14 +749,14 @@ class JobManager:
             status=status,
             created_at=created_at,
             argument_count=argument_count,
-            started_at=payload.get("started_at"),
-            finished_at=payload.get("finished_at"),
+            started_at=started_at,
+            finished_at=finished_at,
             exit_code=exit_code,
-            termination_reason=payload.get("termination_reason"),
+            termination_reason=termination_reason,
             output_truncated=output_truncated,
             stdout=stdout,
             stderr=stderr,
-            error=payload.get("error"),
+            error=error,
             persistent=True,
         )
 
