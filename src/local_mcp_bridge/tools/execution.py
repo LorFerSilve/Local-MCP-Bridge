@@ -65,6 +65,7 @@ _SHELL_NAMES = {
     "wsl.exe",
     "zsh",
 }
+_SHELL_SCRIPT_SUFFIXES = {".bat", ".cmd", ".ps1", ".psm1"}
 _SAFE_ENVIRONMENT_KEYS = (
     "LANG",
     "LC_ALL",
@@ -159,6 +160,13 @@ class ExecutionService:
         return candidate == root or root in candidate.parents
 
     @staticmethod
+    def _reject_shell_target(path: Path) -> None:
+        name = path.name.casefold()
+        suffix = path.suffix.casefold()
+        if name in _SHELL_NAMES or suffix in _SHELL_SCRIPT_SUFFIXES:
+            raise ExecutionError("Shell executables and shell scripts are unavailable in Phase 5.")
+
+    @staticmethod
     def _validate_executable_file(path: Path) -> os.stat_result:
         try:
             metadata = os.lstat(path)
@@ -218,6 +226,7 @@ class ExecutionService:
                 resolved = candidate.resolve(strict=True)
             except (OSError, RuntimeError) as exc:
                 raise ExecutionError("Pinned executable cannot be resolved.") from exc
+            cls._reject_shell_target(resolved)
             metadata = cls._validate_executable_file(resolved)
         else:
             safe_path = os.pathsep.join(safe_path_entries)
@@ -234,10 +243,8 @@ class ExecutionService:
                 raise ExecutionError(
                     "PATH-resolved executables may not originate from inside the project root."
                 )
+            cls._reject_shell_target(resolved)
             metadata = cls._validate_executable_file(resolved)
-
-        if resolved.name.casefold() in _SHELL_NAMES:
-            raise ExecutionError("Shell executables are not available through Phase 5.")
 
         child_path_entries = [str(resolved.parent), *safe_path_entries]
         deduplicated: list[str] = []
@@ -422,7 +429,6 @@ class ExecutionService:
         )
         expected_identity = file_identity(executable_metadata)
 
-        # Recheck the pinned/resolved executable immediately before process creation.
         current_metadata = self._validate_executable_file(resolved_executable)
         if file_identity(current_metadata) != expected_identity:
             raise ExecutionError("Executable identity changed during authorization.")
