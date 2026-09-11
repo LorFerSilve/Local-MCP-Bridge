@@ -177,7 +177,8 @@ class GitSettings:
             or not parsed.path
         ):
             raise RegistryError(
-                "Git remote_url must be an HTTPS URL without embedded credentials, query, or fragment."
+                "Git remote_url must be an HTTPS URL without embedded credentials, "
+                "query, or fragment."
             )
 
         if type(self.timeout_seconds) is not int or not (
@@ -263,7 +264,8 @@ class ProjectRegistry:
 
             if project.permissions.git and project.git is None:
                 raise RegistryError(
-                    f"Project {project.project_id!r} enables Git without a Git synchronization policy."
+                    f"Project {project.project_id!r} enables Git without a Git "
+                    "synchronization policy."
                 )
 
             by_id[project.project_id] = project
@@ -284,7 +286,7 @@ class ProjectRegistry:
         return [self._projects[key].as_public() for key in sorted(self._projects)]
 
     def get_public(self, project_id: str) -> PublicProject | None:
-        """Return MCP-safe metadata for one project, if it exists."""
+        """Return MCP-safe metadata for one project ID, if it exists."""
         project = self._projects.get(project_id)
         return project.as_public() if project is not None else None
 
