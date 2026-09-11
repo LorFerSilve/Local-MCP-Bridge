@@ -258,9 +258,23 @@ class PathGuard:
                     if len(captured) >= max_entries:
                         truncated = True
                         break
-                    child_relative = normalize_relative_path(
-                        str(relative_path / entry.name).replace("\\", "/")
-                    )
+                    try:
+                        child_relative = normalize_relative_path(
+                            str(relative_path / entry.name).replace("\\", "/")
+                        )
+                    except PathConfinementError:
+                        captured.append(
+                            GuardedEntry(
+                                name=entry.name,
+                                relative_path=PurePosixPath("."),
+                                is_directory=False,
+                                is_file=False,
+                                size_bytes=None,
+                                restricted=True,
+                            )
+                        )
+                        continue
+
                     try:
                         metadata = entry.stat(follow_symlinks=False)
                     except OSError:
