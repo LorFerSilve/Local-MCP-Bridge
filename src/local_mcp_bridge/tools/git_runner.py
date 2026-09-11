@@ -208,6 +208,8 @@ class GitCommandRunner:
         "-c",
         "core.fsmonitor=false",
         "-c",
+        "core.logAllRefUpdates=false",
+        "-c",
         "credential.helper=",
         "-c",
         "core.askPass=",
