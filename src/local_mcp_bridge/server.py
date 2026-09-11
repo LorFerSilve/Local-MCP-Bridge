@@ -4,6 +4,16 @@ from mcp.server import MCPServer
 from typing_extensions import TypedDict
 
 from local_mcp_bridge import __version__
+from local_mcp_bridge.jobs import (
+    DEFAULT_LIST_LIMIT,
+    DEFAULT_OUTPUT_CHARS,
+    JobCancelResult,
+    JobListResult,
+    JobManager,
+    JobOutputResult,
+    JobStartResult,
+    JobSummary,
+)
 from local_mcp_bridge.registry import ProjectRegistry, PublicProject
 from local_mcp_bridge.tools.execution import ExecutionService, ProcessResult
 from local_mcp_bridge.tools.filesystem import (
@@ -28,6 +38,8 @@ class HealthStatus(TypedDict):
     projects_configured: int
     filesystem_enabled: bool
     execution_enabled: bool
+    jobs_enabled: bool
+    persistent_jobs: bool
 
 
 class ProjectListStatus(TypedDict):
@@ -46,16 +58,21 @@ class ProjectLookupStatus(TypedDict):
 def create_mcp_server(
     registry: ProjectRegistry | None = None,
     filesystem_limits: FilesystemLimits | None = None,
+    execution_service: ExecutionService | None = None,
+    job_manager: JobManager | None = None,
 ) -> MCPServer:
-    """Create a bridge server bound to an explicitly supplied registry.
+    """Create a bridge server bound to explicitly supplied runtime services.
 
-    This factory intentionally does not read local runtime configuration. That
-    keeps imports deterministic and makes unit tests independent of a user's
-    machine-specific ``config/config.yaml``.
+    This factory intentionally avoids machine-local config and persistent state.
+    The real runtime module supplies a disk-backed job manager; tests use memory.
     """
     active_registry = registry if registry is not None else ProjectRegistry.empty()
     filesystem = FilesystemService(active_registry, filesystem_limits)
-    execution = ExecutionService(active_registry)
+
+    if (execution_service is None) != (job_manager is None):
+        raise ValueError("execution_service and job_manager must be supplied together.")
+    execution = execution_service or ExecutionService(active_registry)
+    jobs = job_manager or JobManager(active_registry, execution)
     server = MCPServer(SERVER_NAME)
 
     @server.tool()
@@ -68,6 +85,8 @@ def create_mcp_server(
             projects_configured=len(active_registry),
             filesystem_enabled=True,
             execution_enabled=True,
+            jobs_enabled=True,
+            persistent_jobs=jobs.persistent,
         )
 
     @server.tool()
@@ -121,7 +140,7 @@ def create_mcp_server(
         cwd: str = ".",
         timeout_seconds: int | None = None,
     ) -> ProcessResult:
-        """Run one allowlisted executable without a shell inside a confined project cwd."""
+        """Run one allowlisted executable synchronously under bounded local policy."""
         return await execution.run_process(
             project_id=project_id,
             executable=executable,
@@ -129,5 +148,57 @@ def create_mcp_server(
             cwd=cwd,
             timeout_seconds=timeout_seconds,
         )
+
+    @server.tool()
+    async def start_job(
+        project_id: str,
+        executable: str,
+        args: list[str] | None = None,
+        cwd: str = ".",
+        timeout_seconds: int | None = None,
+    ) -> JobStartResult:
+        """Start an allowlisted process in the background and return an opaque job ID."""
+        return await jobs.start_job(
+            project_id=project_id,
+            executable=executable,
+            args=args,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        )
+
+    @server.tool()
+    def get_job(job_id: str) -> JobSummary:
+        """Return safe metadata for one managed background job."""
+        return jobs.get_job(job_id)
+
+    @server.tool()
+    def list_jobs(
+        project_id: str | None = None,
+        limit: int = DEFAULT_LIST_LIMIT,
+    ) -> JobListResult:
+        """List recent managed jobs without raw argv or host paths."""
+        return jobs.list_jobs(project_id=project_id, limit=limit)
+
+    @server.tool()
+    def get_job_output(
+        job_id: str,
+        stream: str = "stdout",
+        offset: int = 0,
+        max_chars: int = DEFAULT_OUTPUT_CHARS,
+    ) -> JobOutputResult:
+        """Read one bounded page of sanitized stdout or stderr for a managed job."""
+        if stream not in ("stdout", "stderr"):
+            raise ValueError("stream must be either 'stdout' or 'stderr'.")
+        return jobs.get_job_output(
+            job_id=job_id,
+            stream=stream,
+            offset=offset,
+            max_chars=max_chars,
+        )
+
+    @server.tool()
+    async def cancel_job(job_id: str) -> JobCancelResult:
+        """Cancel a supervised running job."""
+        return await jobs.cancel_job(job_id)
 
     return server
