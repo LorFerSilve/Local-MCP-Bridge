@@ -6,11 +6,11 @@ A security-scoped Model Context Protocol (MCP) bridge for controlled local files
 
 Local-MCP-Bridge lets an MCP-compatible AI client interact with explicitly authorized local development projects without granting an unrestricted shell or arbitrary host-path access.
 
-The project is built in layers: project authorization, read-only filesystem access, hardened path confinement, controlled process execution, persistent jobs, Git synchronization, audit/runtime hardening, and remote MCP integration.
+The project is built in layers: project authorization, read-only filesystem access, hardened path confinement, controlled process execution, persistent background jobs, Git synchronization, audit/runtime hardening, and remote MCP integration.
 
 ## Security model
 
-The MCP client, model-generated tool calls, repository content, paths, command arguments, and process output are untrusted input. Deterministic local policy is the security boundary.
+The MCP client, model-generated tool calls, repository content, paths, command arguments, process output, and persisted job state are untrusted input. Deterministic local policy is the security boundary.
 
 Core rules:
 
@@ -19,19 +19,23 @@ Core rules:
 - **Project-root confinement.** Filesystem access and process working directories are restricted to configured roots.
 - **No path redirection.** Symlinks, redirecting Windows reparse points/junctions, nested mount points, and hard-linked regular files are denied for filesystem reads.
 - **Race-resistant reads.** File identity is checked around open; directory identity is checked around enumeration.
-- **No arbitrary shell.** Phase 5 exposes `run_process(...)`, never `shell(command)`.
+- **No arbitrary shell.** The bridge exposes structured process/job tools, never `shell(command)`.
 - **Executable allowlists.** MCP callers select configured aliases; they cannot supply arbitrary executable paths.
-- **Deterministic PATH resolution.** Unpinned names are searched only in validated absolute PATH directories; the process current directory and project-local PATH entries are never implicit lookup locations.
+- **Deterministic PATH resolution.** Unpinned names are searched only in validated absolute PATH directories; the current directory and project-local PATH entries are never implicit lookup locations.
 - **No shell-script fallback.** Known shells and Windows batch/PowerShell script targets are rejected.
 - **Direct argv execution.** Processes are launched without shell-string parsing.
 - **Confined working directories.** `cwd` is project-relative and validated by the Phase 4 `PathGuard`.
 - **Minimal child environment.** Arbitrary parent environment variables and credentials are not inherited.
-- **Bounded execution.** Argument count/size, runtime, combined stdout/stderr, and per-project concurrency are capped; excess concurrent calls fail immediately instead of building an unbounded queue.
-- **Untrusted output handling.** Control characters are escaped and the configured project-root string is redacted before output is returned.
-- **Local secrets stay local.** Real config, credentials, logs, runtime state, and machine-specific paths remain ignored by Git.
-- **Hermetic tests.** Importing the reusable MCP server factory never reads machine-local runtime configuration.
+- **Bounded execution.** Argument count/size, runtime, output, and concurrency are capped.
+- **Bounded job management.** Background-job inventory, retained history, state-file size, recovery work, list results, and output pages are capped.
+- **No argv persistence.** Raw command arguments are never written to job-state files.
+- **Hardened job-state paths.** Runtime job state rejects redirecting symlink/junction/reparse components and unsafe state files.
+- **Recovery reauthorization.** Persisted jobs are exposed again only when the current project and executable policy still authorizes them.
+- **Untrusted output handling.** Control characters are escaped and the configured project-root string is redacted before output is returned or retained as job output; recovered output is processed again.
+- **Local runtime state stays local.** Real config, credentials, job state, logs, and machine-specific paths remain ignored by Git.
+- **Hermetic tests.** Importing the reusable MCP server factory never reads machine-local configuration or creates persistent runtime state.
 
-Phase 5 is **controlled execution, not a kernel sandbox**. If an allowlisted program executes repository code, that code still runs with the operating-system privileges of the Local-MCP-Bridge process. `execute: true` is therefore a high-trust opt-in for code you are willing to run locally.
+Phases 5 and 6 provide **controlled application-level execution, not a kernel sandbox**. If an allowlisted program executes repository code, that code still runs with the operating-system privileges of the Local-MCP-Bridge process. `execute: true` is therefore a high-trust opt-in.
 
 See [`docs/security-model.md`](docs/security-model.md) and [`docs/threat-model.md`](docs/threat-model.md).
 
@@ -54,6 +58,7 @@ Local-MCP-Bridge/
 │   │   ├── execution.py
 │   │   └── filesystem.py
 │   ├── config.py
+│   ├── jobs.py
 │   ├── registry.py
 │   ├── runtime.py
 │   └── server.py
@@ -62,6 +67,7 @@ Local-MCP-Bridge/
 │   ├── test_execution_concurrency.py
 │   ├── test_execution_resolution.py
 │   ├── test_filesystem.py
+│   ├── test_jobs.py
 │   ├── test_path_confinement.py
 │   ├── test_path_races.py
 │   ├── test_registry.py
@@ -144,13 +150,13 @@ allowed_executables:
   pytest: "C:/absolute/path/to/project/.venv/Scripts/pytest.exe"
 ```
 
-Only `python` and `pytest` are then visible to the MCP client. The absolute executable paths remain internal to the bridge.
+Only aliases such as `python` and `pytest` are exposed to MCP clients. Absolute executable paths remain server-side.
 
-Do **not** enable `execute` merely because a command is allowlisted. An executable such as Python, pytest, a compiler, package manager, or build system may run project-controlled code and can therefore modify files, access the network, or access anything available to the bridge OS account.
+Do **not** enable `execute` merely because a command is allowlisted. Python, pytest, compilers, package managers, and build systems can execute project-controlled code and may therefore modify files, access the network, or access anything available to the bridge OS account.
 
 ## Current MCP tools
 
-Phase 5 exposes:
+Phase 6 exposes:
 
 - `health_check()`;
 - `list_projects()`;
@@ -158,100 +164,121 @@ Phase 5 exposes:
 - `list_directory(project_id, path=".")`;
 - `read_file(project_id, path, start_line=1, max_lines=400)`;
 - `search_text(project_id, query, path=".", case_sensitive=false, max_results=50)`;
-- `run_process(project_id, executable, args=[], cwd=".", timeout_seconds=null)`.
+- `run_process(project_id, executable, args=[], cwd=".", timeout_seconds=null)`;
+- `start_job(project_id, executable, args=[], cwd=".", timeout_seconds=null)`;
+- `get_job(job_id)`;
+- `list_jobs(project_id=null, limit=20)`;
+- `get_job_output(job_id, stream="stdout", offset=0, max_chars=32768)`;
+- `cancel_job(job_id)`.
 
 There is no generic shell tool, caller-provided environment, arbitrary host executable path, interactive stdin, filesystem-write MCP primitive, or dedicated Git mutation tool.
 
-## Phase 4 filesystem confinement
+## Filesystem confinement
 
 Before filesystem content is returned, the bridge validates project-relative paths, sensitive paths, path components, canonical containment, symlink/junction/reparse behavior, hard links, and file/directory identity. Recursive search reauthorizes entries immediately before use.
 
-That boundary is reused by Phase 5 for process working directories.
+That boundary is reused for process and job working directories.
 
-## Phase 5 process execution flow
+## Controlled process execution
 
-```text
-run_process(project_id, executable_alias, argv, cwd, timeout)
-        |
-        v
-resolve project + require execute=true
-        |
-        v
-resolve allowlisted alias
-        |
-        +-- reject arbitrary/unallowlisted executable
-        +-- reject shells and shell-script targets
-        |
-        v
-validate bounded argv + timeout
-        |
-        v
-PathGuard-confine project-relative cwd
-        |
-        v
-resolve executable
-        |
-        +-- pinned canonical executable path, or
-        +-- deterministic scan of validated PATH entries
-        |
-        v
-recheck executable identity
-        |
-        v
-acquire bounded project execution slot
-        |
-        +-- fail immediately when all slots are occupied
-        |
-        v
-build minimal child environment
-        |
-        v
-create_subprocess_exec(...)
-        |
-        +-- stdin = DEVNULL
-        +-- stdout/stderr = bounded pipes
-        +-- no shell
-        |
-        v
-terminate on timeout/output ceiling
-        |
-        v
-sanitize/redact bounded output
-        |
-        v
-return structured result
-```
+`run_process(...)` validates the project, execution permission, executable alias, bounded argv, timeout, confined working directory, executable identity, child environment, output ceiling, and execution capacity before returning a structured result. Non-zero child exit codes are returned as process results; policy violations fail as MCP errors.
 
-A non-zero child exit code is returned as a normal structured process result. Policy failures, invalid paths, invalid argv, unallowlisted executable requests, and exhausted execution capacity fail as MCP errors.
-
-### Execution limits
-
-The implementation has hard ceilings in addition to local configuration:
+Hard execution ceilings include:
 
 - maximum timeout: 300 seconds;
 - maximum combined captured stdout/stderr: 1 MiB;
-- maximum per-project concurrent one-shot processes: 4;
+- maximum per-project concurrent processes: 4;
 - maximum arguments: 64;
 - maximum individual argument length: 4096 characters;
 - maximum combined argument length: 16384 characters.
 
-The example configuration is intentionally stricter than those hard ceilings. Execution capacity is fail-fast: requests beyond the active per-project concurrency limit are rejected instead of queued inside the bridge.
+Execution capacity is fail-fast: requests beyond configured active capacity are rejected rather than queued without a bound.
 
-## Important residual execution risk
+## Phase 6 persistent local job manager
 
-Application-level command policy cannot turn arbitrary native or interpreted code into a sandboxed workload. In particular, allowlisted project code may still:
+`start_job(...)` applies the same Phase 5 execution policy but returns an opaque 32-character job ID instead of keeping the MCP call open until the process exits. The process then remains supervised by the running bridge and can be inspected from later MCP calls.
+
+```text
+start_job(...)
+    |
+    +--> validate project / alias / argv / cwd / timeout
+    |
+    +--> allocate opaque job_id
+    |
+    +--> persist safe job metadata
+    |
+    +--> start supervised background task
+    |
+    `--> return job_id immediately
+
+later:
+
+get_job(job_id) ----------> status / exit metadata
+list_jobs(...) -----------> bounded recent job inventory
+get_job_output(...) ------> bounded stdout/stderr page
+cancel_job(job_id) -------> terminate supervised running job
+```
+
+### Job persistence
+
+The configured runtime server stores job history by default under:
+
+```text
+runtime/jobs/
+```
+
+That directory is ignored by Git. A different location may be selected with:
+
+```text
+LOCAL_MCP_BRIDGE_JOB_STATE_DIR
+```
+
+When supplied, the override must be an absolute path. The state directory rejects redirecting symlink/junction/reparse components. State files are written through exclusive temporary files, `fsync`, and atomic replacement. Redirecting, hard-linked, malformed, and oversized state files are ignored during recovery, and actual record reads reuse the shared race-resistant `PathGuard` primitive.
+
+Persistent state deliberately contains **no raw argv**. It stores only bounded safe metadata plus sanitized/redacted captured stdout and stderr. Output can still contain sensitive information deliberately printed by executed code, so `runtime/` must be treated as local sensitive state and must never be committed.
+
+Recovery is a fresh authorization decision: a record is admitted only when the current registry still contains its project, `execute` remains enabled, and its executable alias remains allowlisted. Recovered output/error text is sanitized and project-root-redacted again before MCP exposure.
+
+### Restart semantics
+
+Terminal job history and terminal output can be recovered after the bridge restarts. A job recorded as `starting`, `running`, or `cancelling` when the bridge starts again is marked `interrupted`; the bridge does not claim to have resumed supervision.
+
+Phase 6 intentionally does **not** persist a PID and later reattach to it. PIDs can be reused, and blindly killing a recovered PID could terminate an unrelated process. If the bridge process itself crashes or is forcibly terminated, an operating-system child may survive as an orphan depending on platform and failure mode. Stronger OS-level process containment is outside the Phase 6 boundary.
+
+### Output polling semantics
+
+Phase 6 persists the bounded final stdout/stderr captured by the Phase 5 runner. Output is paginated with stable character offsets after completion. The current implementation does not promise live durable streaming while the process is still running; a running job may therefore return an empty output page until its execution result is finalized.
+
+### Job limits
+
+In addition to the underlying process limits, the manager enforces:
+
+- at most 32 active managed jobs globally;
+- at most 512 configured retained terminal-history entries, with a default of 128;
+- at most 100 jobs returned by one list call;
+- at most 131072 characters returned by one output-page request;
+- at most 8 MiB per persisted state file;
+- at most 1024 candidate state files examined during startup recovery;
+- at most 64 MiB of candidate state bytes attempted during startup recovery;
+- at most 4 MiB combined recovered stdout/stderr characters per admitted record.
+
+These limits are local safety ceilings and do not turn executed code into a sandbox.
+
+## Residual execution risk
+
+Application-level policy cannot turn arbitrary native or interpreted code into a sandboxed workload. Allowlisted project code may still:
 
 - read/write files accessible to the bridge OS user;
 - make network requests;
 - spawn descendant processes;
-- consume resources within limits not enforced by the operating system;
-- intentionally print sensitive host data it can access.
+- consume resources not bounded by the operating system;
+- deliberately print sensitive host data it can access.
 
-Phase 5 reduces accidental and model-driven command injection risk. It does **not** claim containment against intentionally hostile code. Stronger OS isolation, durable process supervision, cancellation, and job-state management are separate concerns; persistent supervision begins in Phase 6.
+Phase 6 separates long-running work from individual MCP calls and adds bounded local state/recovery. It does **not** claim containment against intentionally hostile code. POSIX cancellation/timeout can target the launched process group; portable Windows behavior guarantees the direct child but does not claim recursive descendant containment.
 
 ## Configuration policy
 
-Only templates belong in Git. Never commit real API keys, auth tokens, tunnel credentials, private certificates, personal machine configuration, or sensitive benchmark output.
+Only templates belong in Git. Never commit real API keys, auth tokens, tunnel credentials, private certificates, personal machine configuration, or sensitive benchmark/job output.
 
 Local-only paths include:
 
@@ -277,7 +304,7 @@ artifacts/
 - **Phase 3:** Safe filesystem tools — complete
 - **Phase 4:** Path/symlink/junction confinement — complete
 - **Phase 5:** Controlled process execution — complete
-- **Phase 6:** Persistent local job manager
+- **Phase 6:** Persistent local job manager — complete
 - **Phase 7:** Git synchronization tools
 - **Phase 8:** Audit logging and runtime hardening
 - **Phase 9:** Remote/tunnel integration
@@ -290,7 +317,7 @@ The repository also preserves a detailed future architecture proposal in [`futur
 
 ## Current status
 
-**Phase 5 complete.** The bridge can inspect authorized project files and run explicitly allowlisted one-shot local processes under bounded policy. Phase 6 will introduce durable job IDs, state, output retrieval, cancellation, and persistent process supervision.
+**Phase 6 complete.** The bridge can inspect authorized project files, run bounded one-shot processes, and supervise background jobs by opaque ID with persistent terminal history, bounded output retrieval, cancellation, reauthorization, and conservative restart recovery. Phase 7 will add constrained Git synchronization tools.
 
 ## License
 

@@ -14,27 +14,42 @@ MCP client / AI agent
 | Runtime composition root  |
 | - loads ignored config    |
 | - builds registry         |
+| - enables local job state |
 +-------------+-------------+
               v
 +---------------------------+
 | MCP tool layer            |
 | - project metadata        |
 | - read-only filesystem    |
-| - controlled execution    |
-+-------------+-------------+
-              |
-      +-------+-------+
-      |               |
-      v               v
-+-------------+  +-------------------+
-| Filesystem  |  | ExecutionService  |
-| policy      |  | - execute permit  |
-| + limits    |  | - alias allowlist |
-+------+------+  | - argv/env limits |
-       |         | - timeout/output  |
-       |         +---------+---------+
-       |                   |
-       v                   v
+| - one-shot execution      |
+| - managed background jobs |
++------+------+-------------+
+       |      |
+       |      +-------------------------+
+       |                                |
+       v                                v
++-------------+                +-------------------+
+| Filesystem  |                | JobManager        |
+| service     |                | - opaque job IDs  |
+| + limits    |                | - status/output   |
++------+------+                | - cancellation    |
+       |                       | - bounded history |
+       |                       | - restart recovery|
+       |                       +---------+---------+
+       |                                 |
+       |                         +-------+-------+
+       |                         |               |
+       |                         v               v
+       |                +-------------------+  runtime/jobs/
+       |                | ExecutionService  |  local state
+       |                | - execute permit  |
+       |                | - alias allowlist |
+       |                | - argv/env limits |
+       |                | - timeout/output  |
+       |                +---------+---------+
+       |                          |
+       +-------------+------------+
+                     v
 +---------------------------+
 | PathGuard confinement     |
 | - lexical validation      |
@@ -51,11 +66,12 @@ MCP client / AI agent
                    (no shell)
 ```
 
-## Active Phase 5 modules
+## Active Phase 6 modules
 
 ```text
 src/local_mcp_bridge/
 ├── config.py
+├── jobs.py
 ├── registry.py
 ├── runtime.py
 ├── server.py
@@ -67,39 +83,39 @@ src/local_mcp_bridge/
     └── filesystem.py
 ```
 
-`config.py` parses local YAML and constructs the immutable project registry. Phase 5 activates executable aliases and bounded execution settings in addition to filesystem permissions.
+`config.py` parses local YAML and constructs the immutable project registry.
 
-`registry.py` maps logical project IDs to canonical roots and host-only executable rules. Public project metadata exposes executable **aliases**, never pinned absolute executable paths.
+`registry.py` maps logical project IDs to canonical roots and host-only executable rules. Public project metadata exposes executable aliases, never pinned absolute executable paths.
 
 `tools/filesystem.py` owns project read/search permissions, sensitive-path filtering, text/binary policy, output shaping, and filesystem resource ceilings.
 
-`security/paths.py` owns the lower-level project path trust boundary. Phase 5 reuses `PathGuard` for process working-directory authorization.
+`security/paths.py` owns the reusable path trust boundary. Filesystem reads, process working-directory validation, and persisted job-state reads reuse `PathGuard` rather than implementing independent path rules.
 
-`tools/execution.py` owns the Phase 5 execution boundary: permission checks, allowlisted executable aliases, constrained executable resolution, argv validation, minimal child environments, process creation without a shell, timeout/output enforcement, concurrency limits, process-output sanitization, and project-root redaction.
+`tools/execution.py` owns controlled process execution: permission checks, executable aliases, constrained executable resolution, argv validation, minimal child environments, shell-free process creation, timeout/output enforcement, concurrency limits, output sanitization, and project-root redaction.
 
-`server.py` remains a pure MCP factory. `runtime.py` remains the only composition root that reads ignored local configuration.
+`jobs.py` owns Phase 6 background-job lifecycle and bounded persistence. It delegates actual process creation and termination to `ExecutionService` so background execution cannot bypass Phase 5 policy.
+
+`server.py` remains a pure MCP factory. By default it uses an in-memory job manager, which keeps imports and tests free of machine-local state. `runtime.py` is the composition root that loads ignored local configuration and installs the disk-backed job manager.
 
 ## Project identity boundary
 
-MCP clients address logical IDs plus relative paths:
+Clients address logical IDs and project-relative paths:
 
 ```text
 read_file(project_id="example-project", path="src/main.py")
 run_process(project_id="example-project", executable="pytest", args=["-q"], cwd=".")
+start_job(project_id="example-project", executable="pytest", args=["-q"], cwd=".")
 ```
 
-Clients do not choose a host project root or arbitrary executable path per call.
+Clients do not choose a host project root, job-state directory, or arbitrary executable path per call.
 
-## Phase 4 path flow
+## Path-confinement flow
 
 ```text
 relative caller path
       |
       v
 lexical validation
-      |
-      v
-sensitive-path policy (filesystem reads)
       |
       v
 lstat each component
@@ -114,7 +130,7 @@ strict canonical resolution
       v
 validate regular file/directory
       |
-      +-- deny hard-linked regular files for reads
+      +-- deny hard-linked regular files for protected reads
       |
       v
 operation-specific identity checks
@@ -123,187 +139,113 @@ operation-specific identity checks
 bounded I/O
 ```
 
-## File-read identity protocol
+`PathGuard.read_bounded` uses a check-open-check sequence: capture file identity, open read-only with `O_NOFOLLOW` where available, compare descriptor identity, revalidate the pathname, then read bounded bytes. Directory snapshots similarly verify directory identity around enumeration.
 
-`PathGuard.read_bounded` performs a check-open-check sequence:
+## One-shot execution model
 
-```text
-lstat/resolve path
-      |
-      v
-capture FileIdentity(dev, inode, type)
-      |
-      v
-os.open(read-only, O_NOFOLLOW where available)
-      |
-      v
-fstat(open descriptor)
-      |
-      +-- identity must match
-      |
-      v
-re-resolve/revalidate pathname
-      |
-      +-- identity/path must still match
-      |
-      v
-read bounded bytes from verified descriptor
-```
+`run_process(...)` remains available for short operations. It validates the selected project and executable alias, bounded argv, timeout, and confined `cwd`; resolves and rechecks the executable; constructs a minimal child environment; and starts the process with `asyncio.create_subprocess_exec` rather than a shell.
 
-Directory snapshots likewise verify identity before and after enumeration. Recursive search stores project-relative paths and reauthorizes each directory/file immediately before use.
+The full parent environment is not inherited, stdin is disabled, stdout/stderr share a bounded capture budget, and timeout/output-limit termination is enforced. POSIX termination targets the launched process group. On Windows, the portable Python primitive guarantees termination of the direct child but not every descendant.
 
-## Phase 5 execution model
+## Phase 6 managed-job model
 
-Phase 5 adds a deliberately **one-shot** process primitive:
+Longer work uses the job manager:
 
 ```text
-run_process(project_id, executable_alias, args, cwd, timeout_seconds)
+start_job(...)
+    |
+    v
+validate project / execute permission / alias / argv / cwd / timeout
+    |
+    v
+allocate opaque 128-bit job ID
+    |
+    v
+persist safe metadata (never raw argv)
+    |
+    v
+create supervised async task
+    |
+    v
+ExecutionService.run_process(...)
+    |
+    +--> status transitions
+    +--> bounded sanitized stdout/stderr
+    +--> timeout/output-limit/nonzero-exit result
+    |
+    v
+persist terminal state
 ```
 
-It is not a job manager. The MCP call remains active until the process exits, times out, hits the output ceiling, or is cancelled. Persistent job IDs and durable supervision belong to Phase 6.
-
-### Authorization flow
+Later MCP calls use only the opaque ID:
 
 ```text
-MCP run_process request
-        |
-        v
-registry.require(project_id)
-        |
-        +-- require permissions.execute == true
-        |
-        v
-ProjectRecord.require_executable(alias)
-        |
-        +-- no arbitrary executable path from caller
-        |
-        v
-validate argv + timeout
-        |
-        v
-normalize/PathGuard-authorize cwd
-        |
-        v
-resolve configured executable target
-        |
-        v
-recheck executable identity
-        |
-        v
-build minimal environment
-        |
-        v
-asyncio.create_subprocess_exec(...)
-        |
-        +-- stdin=DEVNULL
-        +-- stdout/stderr=PIPE
-        +-- direct argv; no shell
-        |
-        v
-bounded collection + termination policy
-        |
-        v
-sanitize/redact output
+get_job(job_id)
+list_jobs(...)
+get_job_output(job_id, stream, offset, max_chars)
+cancel_job(job_id)
 ```
 
-### Executable rules
+`cancel_job` cancels the supervised task; cancellation propagates into `ExecutionService`, which terminates the process using the same Phase 5 termination policy.
 
-There are two local configuration forms.
+## Persistent state boundary
 
-An unpinned alias:
+The configured runtime stores job records below `runtime/jobs/` by default. `LOCAL_MCP_BRIDGE_JOB_STATE_DIR` can select another absolute path. The state directory is local-only and ignored by Git.
 
-```yaml
-allowed_executables:
-  - python
-  - pytest
-```
+Each record contains safe metadata and already-sanitized terminal output. Raw command arguments are deliberately absent because argv may contain credentials or private data.
 
-is resolved through a constrained `PATH`. Relative/empty PATH entries, redirecting PATH directories, unavailable entries, and entries inside the authorized project root are omitted. This reduces executable-substitution risk from a project-local `python`, `pytest`, or similarly named binary.
+Persistence uses exclusive temporary files, flush/fsync, and atomic replacement. On POSIX the bridge applies restrictive directory/file modes as defense in depth. This is application-level hardening; it is not a substitute for OS account isolation or Windows ACL policy.
 
-A pinned alias:
+Runtime-state path components are inspected without following redirecting links. Recovery rejects symlink/junction/reparse state paths, hard-linked or non-regular state files, malformed schemas/types, invalid IDs/timestamps/statuses, and oversized records.
 
-```yaml
-allowed_executables:
-  python: "C:/absolute/path/to/python.exe"
-```
+Actual state-file reads reuse `PathGuard.read_bounded`, including identity checks around the open. Recovery is additionally bounded by history count, directory scan count, per-file size, and a total startup byte budget.
 
-stores the canonical executable path locally while exposing only the alias `python` to MCP clients. Pinned targets are validated as non-redirecting regular executable files. The target identity is rechecked immediately before process creation.
+## Recovery and reauthorization
 
-The portable Python subprocess API cannot provide a single cross-platform, descriptor-based `exec` primitive with the same race guarantees as Phase 4 file reads. Executable replacement by a concurrently privileged local actor therefore remains a residual application-level race; pinned paths and identity rechecks narrow but do not eliminate it.
+Persisted state is untrusted input. A recovered record is admitted only when the current registry still contains its project, `execute` remains enabled, and its executable alias is still allowlisted. Output and error strings are sanitized and project-root-redacted again during recovery rather than trusting the bytes previously written to disk.
 
-### Shell boundary
+Terminal jobs can therefore survive a bridge restart without reopening authorization that has since been revoked.
 
-`ExecutionService` calls `asyncio.create_subprocess_exec`, not a shell API. Known shell targets such as `cmd.exe`, PowerShell, `sh`, and `bash` are rejected even if a local configuration attempts to place one behind an alias.
+A persisted `starting`, `running`, or `cancelling` record is converted to `interrupted` on startup. Phase 6 deliberately does not persist a PID and later reattach to it: PID reuse makes blind reattachment/termination unsafe. If the bridge process crashes, an OS child may survive independently; the recovered metadata does not imply that supervision resumed.
 
-This prevents shell metacharacters in ordinary argv entries from becoming additional shell commands. It does not make arbitrary interpreters safe: for example, Python with `-c` can still execute Python code. That capability is part of the explicit high-trust execution grant.
+## Output semantics
 
-### Working-directory boundary
+The underlying Phase 5 runner captures output under a byte ceiling and sanitizes/redacts it before returning a result. Phase 6 stores that bounded terminal output and serves character-offset pages.
 
-`cwd` is a project-relative path and must pass `PathGuard.resolve_existing(..., expected="directory")`. Symlink/junction/mount traversal and lexical escape attempts therefore fail before process creation.
+The current job manager does not promise live durable streaming while a process is running. Output becomes durable when the underlying invocation finalizes. This keeps Phase 6 persistence simple and avoids presenting partial state as a durable log protocol.
 
-The child process itself is not filesystem-sandboxed. Once running, trusted executable/project code can access any path available to the bridge OS account.
+## Resource boundaries
 
-### Environment boundary
+Phase 6 adds manager-level ceilings on top of Phase 5 process ceilings:
 
-The full parent environment is intentionally not inherited. Phase 5 constructs a small child environment from selected platform/runtime keys plus a constrained `PATH`, and sets Python hardening variables such as `PYTHONNOUSERSITE`.
+- 32 active managed jobs globally;
+- 512 retained terminal records maximum, 128 by default;
+- 100 records returned by one list call;
+- 131072 characters returned by one output-page call;
+- 8 MiB maximum per state file;
+- 1024 candidate state files examined at startup;
+- 64 MiB maximum candidate bytes attempted during startup recovery;
+- 4 MiB maximum recovered stdout/stderr characters per admitted record.
 
-There is no MCP parameter for arbitrary environment injection. This reduces accidental propagation of API keys, cloud credentials, tokens, and bridge-specific secrets into executed code.
-
-### Resource boundary
-
-Per-project policy controls:
-
-```text
-default timeout
-maximum timeout
-combined stdout/stderr bytes
-concurrent one-shot processes
-```
-
-Hard application ceilings prevent local configuration from making these unbounded. Arg count and arg character counts also have hard ceilings.
-
-When the combined output budget is exhausted, the process is terminated rather than continuing with unread pipes. Timeouts also terminate the launched process. POSIX launches use a new session and termination targets the process group; Windows uses a new process group but the standard library kill primitive only guarantees termination of the direct child. Durable process-tree supervision is deferred to the Phase 6 job manager/runtime-hardening work.
-
-### Output boundary
-
-Child output is untrusted. Captured bytes are bounded before decoding. Unsupported terminal/control characters are rendered as escaped text, reducing terminal-control injection. The configured canonical project-root string is replaced with `<project-root>` when it appears directly in returned output.
-
-This redaction is defense in depth, not a secrecy guarantee: executable code can intentionally discover and encode host information in forms that cannot be generically recognized.
+These are denial-of-service controls, not CPU/RAM/GPU/network sandboxing of executed code.
 
 ## Test/runtime isolation
 
 ```text
-pytest -> pure server factory + tmp_path registries
-runtime -> load_runtime_registry() -> local config
+pytest -> pure server factory + in-memory JobManager + tmp_path registries
+runtime -> load_runtime_registry() -> disk-backed JobManager
 ```
 
-Machine-local `config/config.yaml` cannot break pytest collection. Execution tests use explicit temporary registries and pinned test-interpreter paths rather than depending on a developer's machine configuration.
+Machine-local `config/config.yaml` and `runtime/jobs/` cannot become implicit dependencies of reusable server tests.
 
 ## Security boundary
 
-Phase 5 is still an application-level security layer, not an OS sandbox. `execute=true` means the operator has intentionally granted the project the ability to run allowlisted programs under the bridge account. Any executable capable of evaluating project-controlled code inherits the security implications of that code.
+Phases 5 and 6 are application-level security layers, not an OS sandbox. `execute=true` means the operator intentionally allows selected programs to run under the bridge account. A programmable executable may execute project-controlled code that can access resources available to that account.
 
-The security purpose of Phase 5 is therefore to stop **unapproved process selection, shell injection, working-directory escape, accidental credential inheritance, runaway output, and unbounded one-shot execution**. It does not claim to contain hostile native/interpreted code.
+The bridge constrains *selection and orchestration*: project, executable alias, cwd-at-launch, argv shape, environment inheritance, timeout, captured output, concurrency, persistent metadata, and restart behavior. It does not contain intentionally hostile code.
 
-## Phase 6 boundary
+## Future boundaries
 
-Phase 6 will replace one-shot-only execution as the primary long-running workflow with a persistent local job manager:
+Phase 7 adds dedicated Git synchronization tools so Git operations receive narrow policy instead of being treated as generic shell commands. Phase 8 adds broader audit logging and runtime hardening. Remote transport remains deferred until authenticated encrypted exposure can preserve the same local authorization boundary.
 
-```text
-start_job(...) -> job_id
-get_job_status(job_id)
-read_job_output(job_id)
-cancel_job(job_id)
-```
-
-That phase should own durable state, background process lifecycle, stronger descendant-process handling, output persistence/rotation, cancellation semantics, restart recovery policy, and job cleanup.
-
-## Future Git and connector boundaries
-
-Dedicated Git capabilities remain deferred to Phase 7 so Git-specific destructive operations can receive their own policy rather than being treated as generic shell commands.
-
-Long-term connector modularity is documented separately in `future_modularity_expansion_proposal.md`; the current architecture intentionally completes the local execution/audit foundations before introducing heterogeneous external connectors.
-
-## Transport boundary
-
-Development uses local MCP stdio. Browser/cloud MCP clients will later connect only through authenticated encrypted transport/tunneling while all project/path/execution permissions remain enforced locally.
+Long-term connector modularity is documented separately in `future_modularity_expansion_proposal.md`.
