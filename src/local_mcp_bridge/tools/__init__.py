@@ -1,0 +1,1 @@
+"""MCP-facing capability implementations."""
