@@ -21,7 +21,9 @@ Core rules:
 - **Race-resistant reads.** File identity is checked around open; directory identity is checked around enumeration.
 - **No arbitrary shell.** Phase 5 exposes `run_process(...)`, never `shell(command)`.
 - **Executable allowlists.** MCP callers select configured aliases; they cannot supply arbitrary executable paths.
-- **Direct argv execution.** Processes are launched without `cmd.exe`, PowerShell, `/bin/sh`, or shell-string parsing.
+- **Deterministic PATH resolution.** Unpinned names are searched only in validated absolute PATH directories; the process current directory and project-local PATH entries are never implicit lookup locations.
+- **No shell-script fallback.** Known shells and Windows batch/PowerShell script targets are rejected.
+- **Direct argv execution.** Processes are launched without shell-string parsing.
 - **Confined working directories.** `cwd` is project-relative and validated by the Phase 4 `PathGuard`.
 - **Minimal child environment.** Arbitrary parent environment variables and credentials are not inherited.
 - **Bounded execution.** Argument count/size, runtime, combined stdout/stderr, and per-project concurrency are capped.
@@ -57,6 +59,7 @@ Local-MCP-Bridge/
 │   └── server.py
 ├── tests/
 │   ├── test_execution.py
+│   ├── test_execution_resolution.py
 │   ├── test_filesystem.py
 │   ├── test_path_confinement.py
 │   ├── test_path_races.py
@@ -132,7 +135,7 @@ projects:
       max_concurrent_jobs: 1
 ```
 
-Simple executable names are resolved through a constrained `PATH` that excludes the project root. If the executable lives inside the project, for example in `.venv`, pin it explicitly in your ignored local config:
+Simple executable names are resolved by scanning only validated absolute entries from a constrained `PATH`; project-local PATH directories and implicit current-directory lookup are excluded. If the executable lives inside the project, for example in `.venv`, pin it explicitly in your ignored local config:
 
 ```yaml
 allowed_executables:
@@ -176,7 +179,7 @@ resolve project + require execute=true
 resolve allowlisted alias
         |
         +-- reject arbitrary/unallowlisted executable
-        +-- reject shell targets
+        +-- reject shells and shell-script targets
         |
         v
 validate bounded argv + timeout
@@ -188,7 +191,10 @@ PathGuard-confine project-relative cwd
 resolve executable
         |
         +-- pinned canonical executable path, or
-        +-- constrained PATH excluding project root
+        +-- deterministic scan of validated PATH entries
+        |
+        v
+recheck executable identity
         |
         v
 build minimal child environment
@@ -278,7 +284,7 @@ The repository also preserves a detailed future architecture proposal in [`futur
 
 ## Current status
 
-**Phase 5 implemented and under CI validation.** The bridge can inspect authorized project files and run explicitly allowlisted one-shot local processes under bounded policy. Phase 6 will introduce durable job IDs, state, output retrieval, cancellation, and persistent process supervision.
+**Phase 5 complete.** The bridge can inspect authorized project files and run explicitly allowlisted one-shot local processes under bounded policy. Phase 6 will introduce durable job IDs, state, output retrieval, cancellation, and persistent process supervision.
 
 ## License
 
