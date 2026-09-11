@@ -28,12 +28,18 @@ _SENSITIVE_DIRECTORIES = {
     ".ssh",
     ".aws",
     ".azure",
+    ".direnv",
+    ".docker",
     ".gnupg",
+    ".kube",
+    ".terraform",
     "credentials",
     "secrets",
     "tokens",
 }
 _SENSITIVE_FILENAMES = {
+    ".git-credentials",
+    ".netrc",
     ".npmrc",
     ".pypirc",
     "credentials.json",
@@ -44,9 +50,12 @@ _SENSITIVE_FILENAMES = {
 }
 _SENSITIVE_SUFFIXES = {
     ".key",
-    ".p12",
-    ".pfx",
     ".kdbx",
+    ".p12",
+    ".pem",
+    ".pfx",
+    ".ppk",
+    ".tfstate",
 }
 _ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
 _WINDOWS_DEVICE_NAMES = {
@@ -144,7 +153,7 @@ class FilesystemLimits:
             self.max_search_total_bytes,
             self.max_query_chars,
         )
-        if any(value <= 0 for value in values):
+        if any(type(value) is not int or value <= 0 for value in values):
             raise ValueError("Filesystem limits must all be positive integers.")
 
 
@@ -195,10 +204,13 @@ def _is_sensitive(relative_path: PurePosixPath) -> bool:
     name = parts[-1]
     if name in _SENSITIVE_FILENAMES:
         return True
-
-    if name == ".env":
+    if name == ".env" or name == ".envrc":
         return True
     if name.startswith(".env.") and not name.endswith(_ENV_TEMPLATE_SUFFIXES):
+        return True
+    if name.endswith(".tfstate.backup"):
+        return True
+    if name.endswith(".json") and name.startswith(("service-account", "service_account")):
         return True
 
     return any(name.endswith(suffix) for suffix in _SENSITIVE_SUFFIXES)
@@ -219,6 +231,22 @@ def _reject_symlink_components(root: Path, relative_path: PurePosixPath) -> None
                 raise FilesystemAccessError("Symbolic-link paths are not allowed in Phase 3.")
         except OSError as exc:
             raise FilesystemAccessError("Path cannot be safely inspected.") from exc
+
+
+def _read_bounded_bytes(path: Path, max_bytes: int) -> bytes:
+    try:
+        with path.open("rb") as stream:
+            return stream.read(max_bytes + 1)
+    except OSError as exc:
+        raise FilesystemAccessError("File cannot be safely read.") from exc
+
+
+def _normalize_discovered_path(path: Path, root: Path) -> PurePosixPath | None:
+    try:
+        relative_text = _relative_text(path, root)
+        return _normalize_relative_path(relative_text)
+    except (FilesystemAccessError, ValueError):
+        return None
 
 
 class FilesystemService:
@@ -306,7 +334,11 @@ class FilesystemService:
                         truncated = True
                         break
 
-                    child_relative = PurePosixPath(*relative_directory.parts, entry.name)
+                    child = Path(entry.path)
+                    child_relative = _normalize_discovered_path(child, project.root)
+                    if child_relative is None:
+                        restricted_entries += 1
+                        continue
                     if _is_sensitive(child_relative) or entry.is_symlink():
                         restricted_entries += 1
                         continue
@@ -336,7 +368,7 @@ class FilesystemService:
         entries.sort(key=lambda item: (item["type"] != "directory", item["name"].casefold()))
         return DirectoryListResult(
             project_id=project_id,
-            path=_relative_text(directory, project.root),
+            path=relative_directory.as_posix(),
             entries=entries,
             truncated=truncated,
             restricted_entries_omitted=restricted_entries,
@@ -362,14 +394,12 @@ class FilesystemService:
 
         try:
             size = file_path.stat().st_size
-            if size > self._limits.max_read_bytes:
-                raise FilesystemAccessError("File exceeds the configured read-size limit.")
-            data = file_path.read_bytes()
-        except FilesystemAccessError:
-            raise
         except OSError as exc:
-            raise FilesystemAccessError("File cannot be safely read.") from exc
+            raise FilesystemAccessError("File cannot be safely inspected.") from exc
+        if size > self._limits.max_read_bytes:
+            raise FilesystemAccessError("File exceeds the configured read-size limit.")
 
+        data = _read_bounded_bytes(file_path, self._limits.max_read_bytes)
         if len(data) > self._limits.max_read_bytes:
             raise FilesystemAccessError("File exceeds the configured read-size limit.")
         if b"\x00" in data:
@@ -382,7 +412,9 @@ class FilesystemService:
 
         lines = text.splitlines(keepends=True)
         total_lines = len(lines)
-        if start_line > total_lines and total_lines != 0:
+        if total_lines == 0 and start_line != 1:
+            raise FilesystemAccessError("start_line is beyond the end of the file.")
+        if total_lines != 0 and start_line > total_lines:
             raise FilesystemAccessError("start_line is beyond the end of the file.")
 
         if total_lines == 0:
@@ -461,27 +493,34 @@ class FilesystemService:
                 file_path = pending_files.popleft()
             else:
                 directory = pending_directories.popleft()
+                discovered: list[tuple[str, Path, bool, bool, bool]] = []
                 try:
-                    scanned_entries = list(os.scandir(directory))
+                    with os.scandir(directory) as iterator:
+                        for entry in iterator:
+                            if entries_seen >= self._limits.max_search_entries:
+                                truncated = True
+                                break
+                            entries_seen += 1
+                            try:
+                                discovered.append(
+                                    (
+                                        entry.name,
+                                        Path(entry.path),
+                                        entry.is_symlink(),
+                                        entry.is_dir(follow_symlinks=False),
+                                        entry.is_file(follow_symlinks=False),
+                                    )
+                                )
+                            except OSError:
+                                restricted += 1
                 except OSError:
                     restricted += 1
                     continue
 
-                scanned_entries.sort(key=lambda entry: entry.name.casefold())
-                for entry in scanned_entries:
-                    entries_seen += 1
-                    if entries_seen > self._limits.max_search_entries:
-                        truncated = True
-                        break
-
-                    candidate = Path(entry.path)
-                    try:
-                        relative = PurePosixPath(_relative_text(candidate, project.root))
-                    except ValueError:
-                        restricted += 1
-                        continue
-
-                    if _is_sensitive(relative) or entry.is_symlink():
+                discovered.sort(key=lambda item: item[0].casefold())
+                for _, candidate, is_link, is_directory, is_file in discovered:
+                    relative = _normalize_discovered_path(candidate, project.root)
+                    if relative is None or _is_sensitive(relative) or is_link:
                         restricted += 1
                         continue
 
@@ -494,12 +533,11 @@ class FilesystemService:
                         restricted += 1
                         continue
 
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            pending_directories.append(resolved)
-                        elif entry.is_file(follow_symlinks=False):
-                            pending_files.append(resolved)
-                    except OSError:
+                    if is_directory:
+                        pending_directories.append(resolved)
+                    elif is_file:
+                        pending_files.append(resolved)
+                    else:
                         restricted += 1
 
                 if truncated:
@@ -507,27 +545,30 @@ class FilesystemService:
                 continue
 
             try:
-                stat = file_path.stat()
+                size = file_path.stat().st_size
             except OSError:
                 skipped += 1
                 continue
 
-            if stat.st_size > self._limits.max_search_file_bytes:
+            if size > self._limits.max_search_file_bytes:
                 skipped += 1
                 continue
-            if bytes_scanned + stat.st_size > self._limits.max_search_total_bytes:
+            if bytes_scanned + size > self._limits.max_search_total_bytes:
                 truncated = True
                 break
 
             try:
-                data = file_path.read_bytes()
-            except OSError:
+                data = _read_bounded_bytes(file_path, self._limits.max_search_file_bytes)
+            except FilesystemAccessError:
                 skipped += 1
                 continue
 
             if len(data) > self._limits.max_search_file_bytes or b"\x00" in data:
                 skipped += 1
                 continue
+            if bytes_scanned + len(data) > self._limits.max_search_total_bytes:
+                truncated = True
+                break
 
             try:
                 text = data.decode("utf-8")
