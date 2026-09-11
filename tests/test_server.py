@@ -146,7 +146,11 @@ def test_filesystem_tools_work_end_to_end_without_absolute_path_leaks(tmp_path: 
             assert searched.structured_content is not None
             assert searched.structured_content["matches"][0]["path"] == "src/main.py"
 
-            combined = f"{listed.structured_content}{read.structured_content}{searched.structured_content}"
+            combined = (
+                f"{listed.structured_content}"
+                f"{read.structured_content}"
+                f"{searched.structured_content}"
+            )
             assert str(tmp_path) not in combined
 
     asyncio.run(scenario())
