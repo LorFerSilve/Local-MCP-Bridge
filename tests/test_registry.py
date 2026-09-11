@@ -1,5 +1,6 @@
-"""Security-focused tests for Phase 2 project configuration and registry loading."""
+"""Security-focused tests for project configuration and registry loading."""
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,7 @@ def test_valid_project_is_canonicalized_and_public_metadata_hides_root(tmp_path:
                 "execute": False,
                 "git": False,
             },
+            "allowed_executables": [],
         }
     ]
     assert "root" not in registry.list_public()[0]
@@ -215,6 +217,128 @@ projects:
     )
 
     with pytest.raises(ConfigError, match="Unknown project 'demo' key"):
+        load_project_registry(config)
+
+
+def test_execute_permission_requires_nonempty_allowlist(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = _write_config(
+        tmp_path,
+        _project_yaml(project_root, permissions="execute: true"),
+    )
+
+    with pytest.raises(ConfigError, match="without any allowed_executables"):
+        load_project_registry(config)
+
+
+def test_unpinned_executable_allowlist_is_public_by_alias_only(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = _write_config(
+        tmp_path,
+        f"""
+projects:
+  demo:
+    root: {project_root.as_posix()!r}
+    permissions:
+      execute: true
+    allowed_executables:
+      - python
+      - pytest
+    execution:
+      default_timeout_seconds: 20
+      max_timeout_seconds: 120
+      max_output_bytes: 65536
+      max_concurrent_jobs: 1
+""",
+    )
+
+    registry = load_project_registry(config)
+    record = registry.require("demo")
+
+    assert [rule.alias for rule in record.allowed_executables] == ["python", "pytest"]
+    assert all(rule.pinned is False for rule in record.allowed_executables)
+    assert record.execution.default_timeout_seconds == 20
+    assert record.execution.max_timeout_seconds == 120
+    assert record.execution.max_output_bytes == 65536
+    assert registry.get_public("demo")["allowed_executables"] == ["pytest", "python"]
+
+
+def test_pinned_executable_path_is_kept_private(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    python_path = Path(sys.executable).resolve(strict=True)
+    config = _write_config(
+        tmp_path,
+        f"""
+projects:
+  demo:
+    root: {project_root.as_posix()!r}
+    permissions:
+      execute: true
+    allowed_executables:
+      py: {python_path.as_posix()!r}
+""",
+    )
+
+    registry = load_project_registry(config)
+    record = registry.require("demo")
+
+    assert record.allowed_executables[0].alias == "py"
+    assert record.allowed_executables[0].pinned is True
+    assert Path(record.allowed_executables[0].executable) == python_path
+    assert str(python_path) not in str(registry.get_public("demo"))
+
+
+def test_execution_hard_timeout_ceiling_is_enforced(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = _write_config(
+        tmp_path,
+        f"""
+projects:
+  demo:
+    root: {project_root.as_posix()!r}
+    allowed_executables: [python]
+    execution:
+      max_timeout_seconds: 301
+""",
+    )
+
+    with pytest.raises(ConfigError, match="may not exceed 300"):
+        load_project_registry(config)
+
+
+def test_unknown_execution_key_is_rejected(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = _write_config(
+        tmp_path,
+        f"""
+projects:
+  demo:
+    root: {project_root.as_posix()!r}
+    execution:
+      unlimited_output: true
+""",
+    )
+
+    with pytest.raises(ConfigError, match="Unknown execution key"):
+        load_project_registry(config)
+
+
+def test_arbitrary_shell_security_switch_cannot_be_enabled(tmp_path: Path) -> None:
+    config = _write_config(
+        tmp_path,
+        """
+security:
+  deny_by_default: true
+  allow_arbitrary_shell: true
+""",
+    )
+
+    with pytest.raises(ConfigError, match="allow_arbitrary_shell may not be enabled"):
         load_project_registry(config)
 
 
