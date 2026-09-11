@@ -65,7 +65,7 @@ def test_list_directory_limit_sets_truncated(tmp_path: Path) -> None:
 
 def test_read_file_returns_bounded_line_slice(tmp_path: Path) -> None:
     file_path = tmp_path / "module.py"
-    file_path.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+    file_path.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8", newline="\n")
 
     result = _service(tmp_path).read_file("demo", "module.py", start_line=2, max_lines=2)
 
@@ -80,6 +80,16 @@ def test_read_file_returns_bounded_line_slice(tmp_path: Path) -> None:
         "next_start_line": 4,
     }
     assert str(tmp_path) not in str(result)
+
+
+def test_read_file_preserves_existing_crlf_bytes(tmp_path: Path) -> None:
+    file_path = tmp_path / "windows.txt"
+    file_path.write_bytes(b"one\r\ntwo\r\n")
+
+    result = _service(tmp_path).read_file("demo", "windows.txt")
+
+    assert result["content"] == "one\r\ntwo\r\n"
+    assert result["total_lines"] == 2
 
 
 def test_read_file_rejects_binary_and_large_files(tmp_path: Path) -> None:
