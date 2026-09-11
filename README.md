@@ -55,7 +55,8 @@ Local-MCP-Bridge/
 │   ├── test_path_races.py
 │   ├── test_registry.py
 │   ├── test_runtime_isolation.py
-│   └── test_server.py
+│   ├── test_server.py
+│   └── test_unsafe_entries.py
 ├── pyproject.toml
 ├── SECURITY.md
 └── README.md
