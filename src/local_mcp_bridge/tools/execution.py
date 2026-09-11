@@ -16,7 +16,6 @@ import asyncio
 import contextlib
 import os
 import re
-import shutil
 import signal
 import stat
 import subprocess
@@ -66,10 +65,10 @@ _SHELL_NAMES = {
     "zsh",
 }
 _SHELL_SCRIPT_SUFFIXES = {".bat", ".cmd", ".ps1", ".psm1"}
+_WINDOWS_EXECUTABLE_SUFFIXES = ("", ".exe", ".com")
 _SAFE_ENVIRONMENT_KEYS = (
     "LANG",
     "LC_ALL",
-    "PATHEXT",
     "SYSTEMROOT",
     "TEMP",
     "TMP",
@@ -210,6 +209,37 @@ class ExecutionService:
         return entries
 
     @classmethod
+    def _resolve_from_safe_path(cls, command: str, path_entries: list[str]) -> Path:
+        """Resolve a simple command by scanning only approved absolute PATH entries."""
+        if not path_entries:
+            raise ExecutionError("No safe PATH entries are available for executable resolution.")
+
+        command_path = Path(command)
+        if os.name == "nt" and command_path.suffix:
+            candidate_names = (command,)
+        elif os.name == "nt":
+            candidate_names = tuple(command + suffix for suffix in _WINDOWS_EXECUTABLE_SUFFIXES)
+        else:
+            candidate_names = (command,)
+
+        for directory in path_entries:
+            for candidate_name in candidate_names:
+                candidate = Path(directory) / candidate_name
+                try:
+                    resolved = candidate.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    continue
+
+                cls._reject_shell_target(resolved)
+                try:
+                    cls._validate_executable_file(resolved)
+                except ExecutionError:
+                    continue
+                return resolved
+
+        raise ExecutionError("Allowlisted executable is unavailable on the constrained PATH.")
+
+    @classmethod
     def _resolve_executable(
         cls,
         project: ProjectRecord,
@@ -229,21 +259,11 @@ class ExecutionService:
             cls._reject_shell_target(resolved)
             metadata = cls._validate_executable_file(resolved)
         else:
-            safe_path = os.pathsep.join(safe_path_entries)
-            resolved_text = shutil.which(rule.executable, path=safe_path)
-            if resolved_text is None:
-                raise ExecutionError(
-                    "Allowlisted executable is unavailable on the constrained PATH."
-                )
-            try:
-                resolved = Path(resolved_text).resolve(strict=True)
-            except (OSError, RuntimeError) as exc:
-                raise ExecutionError("Allowlisted executable cannot be resolved.") from exc
+            resolved = cls._resolve_from_safe_path(rule.executable, safe_path_entries)
             if cls._is_inside(project.root, resolved):
                 raise ExecutionError(
                     "PATH-resolved executables may not originate from inside the project root."
                 )
-            cls._reject_shell_target(resolved)
             metadata = cls._validate_executable_file(resolved)
 
         child_path_entries = [str(resolved.parent), *safe_path_entries]
@@ -266,6 +286,8 @@ class ExecutionService:
                 environment[key] = value
 
         environment["PATH"] = os.pathsep.join(path_entries)
+        if os.name == "nt":
+            environment["PATHEXT"] = ".COM;.EXE"
         environment["PYTHONNOUSERSITE"] = "1"
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["PYTHONUTF8"] = "1"
