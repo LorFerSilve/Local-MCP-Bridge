@@ -1,7 +1,7 @@
 # Example base configuration only. Copy to config/config.yaml for local use.
 # The real config is ignored by Git and must never be committed.
 
-# Reserved for the later HTTP/tunnel transport phase. Phase 7 still uses stdio.
+# Reserved for the later HTTP/tunnel transport phase. Phase 8 still uses stdio.
 server:
   host: "127.0.0.1"
   port: 8000
@@ -20,7 +20,7 @@ projects:
       search: true
       # Controlled process execution remains a separate high-trust capability.
       execute: false
-      # Phase 7 Git is enabled through config/git.local.yaml, not by MCP input.
+      # Dedicated Git sync is enabled through config/git.local.yaml, not MCP input.
       # Keep this false in the base file; the trusted local Git overlay turns it
       # on only when a complete remote/branch policy is present.
       git: false
@@ -39,13 +39,19 @@ projects:
       max_output_bytes: 262144
       max_concurrent_jobs: 1
 
-# Phase 7 Git synchronization is configured separately:
+# Git synchronization is configured separately:
 #   Copy-Item config/git.example.yaml config/git.local.yaml
 #
 # The Git overlay pins one HTTPS remote URL and one branch per project. MCP callers
 # can request only status, fetch, or clean fast-forward synchronization; they cannot
 # provide arbitrary Git argv, URLs, refs, pushes, resets, cleans, checkouts, rebases,
 # force operations, or history rewrites.
+#
+# Phase 8 local audit state is configured by runtime wiring rather than this YAML:
+# - default audit directory: runtime/audit/
+# - optional absolute override: LOCAL_MCP_BRIDGE_AUDIT_DIR
+# - raw argv/output/query/path/content/credential text is not part of the audit schema
+# - high-impact configured-runtime actions require a successful pre-operation audit write
 #
 # Base policy remains fail-closed:
 # - Project IDs address canonical local roots; roots may not overlap.
