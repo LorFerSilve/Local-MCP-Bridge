@@ -37,6 +37,21 @@ MAX_AUDIT_DETAIL_FIELDS = 16
 
 AuditScalar: TypeAlias = str | int | bool | None
 AuditDetails: TypeAlias = Mapping[str, AuditScalar]
+_ALLOWED_ACTIONS = {
+    "runtime.bootstrap",
+    "filesystem.list_directory",
+    "filesystem.read_file",
+    "filesystem.search_text",
+    "process.run",
+    "job.start",
+    "job.get",
+    "job.list",
+    "job.output",
+    "job.cancel",
+    "git.status",
+    "git.fetch",
+    "git.sync_fast_forward",
+}
 _ALLOWED_OUTCOMES = {"attempt", "success", "error", "denied"}
 _ALLOWED_INTEGER_DETAILS = {
     "projects_configured",
@@ -245,6 +260,8 @@ class AuditLogger:
             return False
 
         safe_action = _validate_label(action, "action")
+        if safe_action not in _ALLOWED_ACTIONS:
+            raise AuditError("Audit action is outside the fixed metadata schema.")
         if outcome not in _ALLOWED_OUTCOMES:
             raise AuditError("Audit outcome is invalid.")
         if project_id is not None and not PROJECT_ID_PATTERN.fullmatch(project_id):
