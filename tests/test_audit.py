@@ -195,7 +195,9 @@ def test_server_audit_never_logs_paths_queries_contents_or_argv(tmp_path: Path) 
     assert str(project.resolve()) not in log_text
 
 
-def test_sensitive_operation_is_refused_when_enabled_audit_fails() -> None:
+def test_sensitive_operation_is_refused_before_execution_when_audit_fails(
+    tmp_path: Path,
+) -> None:
     class BrokenAudit:
         enabled = True
         healthy = False
@@ -203,9 +205,45 @@ def test_sensitive_operation_is_refused_when_enabled_audit_fails() -> None:
         def record(self, *args: object, **kwargs: object) -> bool:
             raise AuditError("broken")
 
+    class SpyExecution:
+        called = False
+
+        async def run_process(self, **kwargs: object) -> dict[str, object]:
+            self.called = True
+            return {
+                "project_id": "demo",
+                "executable": "python",
+                "cwd": ".",
+                "exit_code": 0,
+                "stdout": "",
+                "stderr": "",
+                "termination_reason": "exited",
+                "output_truncated": False,
+                "duration_ms": 0,
+            }
+
+    class DummyJobs:
+        persistent = False
+
+    registry = ProjectRegistry(
+        [
+            ProjectRecord(
+                project_id="demo",
+                root=tmp_path.resolve(),
+                permissions=ProjectPermissions(execute=True),
+            )
+        ]
+    )
+    execution = SpyExecution()
+
     async def scenario() -> None:
         async with Client(
-            create_mcp_server(audit_logger=BrokenAudit()),  # type: ignore[arg-type]
+            create_mcp_server(
+                registry,
+                execution_service=execution,  # type: ignore[arg-type]
+                job_manager=DummyJobs(),  # type: ignore[arg-type]
+                audit_logger=BrokenAudit(),  # type: ignore[arg-type]
+            ),
             raise_exceptions=False,
         ) as client:
             result = await client.call_tool(
@@ -217,6 +255,6 @@ def test_sensitive_operation_is_refused_when_enabled_audit_fails() -> None:
                 },
             )
             assert result.is_error is True
-            assert "Audit logging is unavailable" in str(result)
+            assert execution.called is False
 
     asyncio.run(scenario())
