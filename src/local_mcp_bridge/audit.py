@@ -1,7 +1,10 @@
 """Local-only structured audit logging for security-relevant bridge activity.
 
-The audit log is deliberately metadata-only. It never accepts raw command arguments,
-process output, search queries, file contents, host paths, Git URLs, or credentials.
+The audit log is deliberately metadata-only. Its schema accepts only fixed action labels,
+validated project IDs, bounded numeric/boolean fields, and a few fixed enum values. It has
+no field for raw command arguments, process output, search queries, file contents, host
+paths, Git URLs, credentials, or arbitrary error text.
+
 Runtime wiring enables a persistent logger; the reusable server factory defaults to a
 non-persistent logger so imports and unit tests remain hermetic.
 """
@@ -19,6 +22,7 @@ from typing import Mapping, TypeAlias
 
 from typing_extensions import TypedDict
 
+from local_mcp_bridge.registry import PROJECT_ID_PATTERN
 from local_mcp_bridge.security.paths import file_identity, is_redirecting_metadata
 
 AUDIT_SCHEMA_VERSION = 1
@@ -29,11 +33,54 @@ MAX_AUDIT_RETAINED_FILES = 16
 MAX_AUDIT_EVENT_BYTES = 4096
 MAX_AUDIT_LABEL_CHARS = 128
 MAX_AUDIT_DETAIL_FIELDS = 16
-MAX_AUDIT_DETAIL_STRING_CHARS = 256
 
 AuditScalar: TypeAlias = str | int | bool | None
 AuditDetails: TypeAlias = Mapping[str, AuditScalar]
 _ALLOWED_OUTCOMES = {"attempt", "success", "error", "denied"}
+_ALLOWED_INTEGER_DETAILS = {
+    "projects_configured",
+    "requested_max_lines",
+    "requested_max_results",
+    "argument_count",
+    "exit_code",
+    "returned_jobs",
+    "requested_limit",
+    "requested_max_chars",
+    "ahead",
+    "behind",
+}
+_ALLOWED_BOOLEAN_DETAILS = {
+    "persistent_jobs",
+    "case_sensitive",
+    "timeout_overridden",
+    "output_truncated",
+    "complete",
+    "accepted",
+    "clean",
+    "changed",
+    "updated",
+}
+_ALLOWED_ENUM_DETAILS = {
+    "status": {
+        "starting",
+        "running",
+        "cancelling",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timeout",
+        "output_limit",
+        "interrupted",
+    },
+    "stream": {"stdout", "stderr"},
+    "termination_reason": {
+        "exited",
+        "timeout",
+        "output_limit",
+        "cancelled",
+        "bridge_restart",
+    },
+}
 
 
 class AuditError(RuntimeError):
@@ -66,18 +113,20 @@ def _validate_details(details: AuditDetails | None) -> dict[str, AuditScalar]:
     validated: dict[str, AuditScalar] = {}
     for key, value in details.items():
         safe_key = _validate_label(key, "detail key")
-        if isinstance(value, bool) or value is None:
+        if value is None:
+            if safe_key not in _ALLOWED_INTEGER_DETAILS:
+                raise AuditError("Audit detail is not part of the fixed metadata schema.")
+            validated[safe_key] = None
+        elif safe_key in _ALLOWED_INTEGER_DETAILS and type(value) is int:
             validated[safe_key] = value
-        elif type(value) is int:
+        elif safe_key in _ALLOWED_BOOLEAN_DETAILS and isinstance(value, bool):
             validated[safe_key] = value
-        elif isinstance(value, str):
-            if len(value) > MAX_AUDIT_DETAIL_STRING_CHARS:
-                raise AuditError("Audit detail text exceeds the safety limit.")
-            if any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in value):
-                raise AuditError("Audit detail text contains unsupported control characters.")
+        elif safe_key in _ALLOWED_ENUM_DETAILS and isinstance(value, str):
+            if value not in _ALLOWED_ENUM_DETAILS[safe_key]:
+                raise AuditError("Audit enum detail is outside the fixed metadata schema.")
             validated[safe_key] = value
         else:
-            raise AuditError("Audit details may contain only bounded scalar metadata.")
+            raise AuditError("Audit detail is not part of the fixed metadata schema.")
     return validated
 
 
@@ -183,7 +232,7 @@ class AuditLogger:
         project_id: str | None = None,
         details: AuditDetails | None = None,
     ) -> bool:
-        """Persist one metadata-only audit event.
+        """Persist one fixed-schema metadata event.
 
         ``False`` means auditing is intentionally disabled for a hermetic/in-memory server.
         An enabled logger raises ``AuditError`` rather than silently dropping an event.
@@ -194,7 +243,8 @@ class AuditLogger:
         safe_action = _validate_label(action, "action")
         if outcome not in _ALLOWED_OUTCOMES:
             raise AuditError("Audit outcome is invalid.")
-        safe_project = None if project_id is None else _validate_label(project_id, "project ID")
+        if project_id is not None and not PROJECT_ID_PATTERN.fullmatch(project_id):
+            raise AuditError("Audit project ID is outside the registry identifier policy.")
         safe_details = _validate_details(details)
 
         with self._lock:
@@ -207,7 +257,7 @@ class AuditLogger:
                 "event_id": uuid.uuid4().hex,
                 "action": safe_action,
                 "outcome": outcome,
-                "project_id": safe_project,
+                "project_id": project_id,
                 "details": safe_details,
             }
             encoded = (
@@ -238,6 +288,10 @@ class AuditLogger:
             metadata = None
 
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        if metadata is None:
+            # Exclusive creation closes the create-vs-redirection race even where
+            # O_NOFOLLOW is unavailable (notably portable Windows Python).
+            flags |= os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
 
