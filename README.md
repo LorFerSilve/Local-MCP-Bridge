@@ -1,23 +1,23 @@
 # Local-MCP-Bridge
 
-A security-scoped Model Context Protocol (MCP) bridge for controlled local filesystem access, development execution, background jobs, and constrained Git synchronization.
+A security-scoped Model Context Protocol (MCP) bridge for controlled local filesystem access, development execution, persistent background jobs, constrained Git synchronization, and metadata-only operational auditing.
 
 ## Purpose
 
-Local-MCP-Bridge lets an MCP-compatible AI client interact with explicitly authorized local development projects without granting an unrestricted shell, arbitrary host-path access, or a generic Git command surface.
+Local-MCP-Bridge lets an MCP-compatible AI client interact with explicitly authorized local development projects without granting an unrestricted shell, arbitrary host-path access, generic Git execution, or raw access to local runtime/audit state.
 
 The project is built in layers: project authorization, read-only filesystem access, hardened path confinement, controlled process execution, persistent background jobs, constrained Git synchronization, audit/runtime hardening, and remote MCP integration.
 
 ## Security model
 
-The MCP client, model-generated tool calls, repository content, paths, command arguments, process output, persisted job state, Git metadata, and repository-local Git configuration are untrusted input. Deterministic machine-local policy is the security boundary.
+The MCP client, model-generated tool calls, repository content, paths, command arguments, process output, persisted job state, Git metadata, repository-local Git configuration, and local runtime-state paths are untrusted input. Deterministic machine-local policy is the security boundary.
 
 Core rules:
 
 - **Deny by default.** No project is available unless explicitly configured.
 - **Project IDs instead of host paths.** Clients address logical IDs; absolute roots remain server-side.
 - **Project-root confinement.** Filesystem access and process working directories are restricted to configured roots.
-- **No path redirection.** Symlinks, redirecting Windows reparse points/junctions, nested mount points, and hard-linked regular files are denied for filesystem reads.
+- **No path redirection.** Symlinks, redirecting Windows reparse points/junctions, nested mount points, and hard-linked protected files are denied at security-sensitive boundaries.
 - **Race-resistant reads.** File identity is checked around open; directory identity is checked around enumeration.
 - **No arbitrary shell.** Structured process/job tools are exposed instead of `shell(command)`.
 - **Executable allowlists.** MCP callers select configured aliases; they cannot supply arbitrary executable paths.
@@ -26,16 +26,20 @@ Core rules:
 - **Bounded execution and jobs.** Runtime, output, arguments, concurrency, retained history, recovery work, and output pages are capped.
 - **No argv persistence.** Raw command arguments are never written to persistent job-state files.
 - **Recovery reauthorization.** Persisted jobs are exposed again only when current policy still authorizes them.
-- **Dedicated Git boundary.** Phase 7 exposes status, trusted fetch, and clean fast-forward synchronization instead of generic Git execution.
+- **Dedicated Git boundary.** Git is limited to status, trusted fetch, and clean fast-forward synchronization instead of generic Git execution.
 - **Pinned Git policy.** Remote name, branch, and HTTPS URL come from an ignored local policy overlay, never from MCP request parameters.
 - **No Git history rewriting.** No push, reset, clean, checkout, rebase, force operation, arbitrary refspec, arbitrary URL, or caller-supplied Git argv is exposed.
-- **Repository-local Git config is untrusted.** Hooks, filters, credentials, includes, URL rewrites, submodule configuration, protocol/HTTP overrides, merge drivers, and other dangerous capabilities are rejected.
-- **Local runtime state stays local.** Real config, Git policy, credentials, job state, logs, and machine-specific paths remain ignored by Git.
-- **Hermetic server factory.** Importing the reusable MCP server factory never loads machine-local project/Git policy or creates persistent runtime state.
+- **Repository-local Git config is untrusted.** Hooks, filters, credentials, includes, URL rewrites, submodules, protocol/HTTP overrides, merge drivers, and other dangerous capabilities are rejected.
+- **Metadata-only audit schema.** Phase 8 audit events cannot contain raw argv, output, queries, caller paths, file content, Git URLs, credentials, environment values, or arbitrary exception text.
+- **Fail-closed sensitive actions.** In the configured runtime, process execution, job start/cancel, Git fetch, and Git synchronization require a successful persistent pre-operation audit record.
+- **Bounded local audit state.** Audit paths reject unsafe redirection/hard links; event size, active-log size, and retained files are capped.
+- **Audit logs are not MCP context.** There is no raw audit-log reader tool.
+- **Local runtime state stays local.** Real config, Git policy, credentials, job state, audit logs, and machine-specific paths remain ignored by Git.
+- **Hermetic server factory.** Importing/reusing the pure MCP server factory never loads machine-local project/Git/audit policy or creates persistent runtime state.
 
-Phases 5–7 provide controlled application-level capabilities, **not a kernel sandbox**. Allowlisted executable code and Git itself still run with the operating-system privileges of the Local-MCP-Bridge process.
+Phases 5–8 provide controlled application-level capabilities, **not a kernel sandbox or tamper-proof forensic system**. Allowlisted executable code and Git still run with the operating-system privileges of the Local-MCP-Bridge process.
 
-See [`docs/security-model.md`](docs/security-model.md), [`docs/threat-model.md`](docs/threat-model.md), and [`docs/phase-7-git-sync.md`](docs/phase-7-git-sync.md).
+See [`docs/security-model.md`](docs/security-model.md), [`docs/threat-model.md`](docs/threat-model.md), [`docs/phase-7-git-sync.md`](docs/phase-7-git-sync.md), and [`docs/phase-8-audit-runtime-hardening.md`](docs/phase-8-audit-runtime-hardening.md).
 
 ## Repository layout
 
@@ -49,6 +53,7 @@ Local-MCP-Bridge/
 ├── docs/
 │   ├── architecture.md
 │   ├── phase-7-git-sync.md
+│   ├── phase-8-audit-runtime-hardening.md
 │   ├── security-model.md
 │   └── threat-model.md
 ├── src/local_mcp_bridge/
@@ -60,6 +65,7 @@ Local-MCP-Bridge/
 │   │   ├── git_repository.py
 │   │   ├── git_runner.py
 │   │   └── git_service.py
+│   ├── audit.py
 │   ├── config.py
 │   ├── git_config.py
 │   ├── jobs.py
@@ -67,6 +73,7 @@ Local-MCP-Bridge/
 │   ├── runtime.py
 │   └── server.py
 ├── tests/
+│   ├── test_audit.py
 │   ├── test_execution.py
 │   ├── test_filesystem.py
 │   ├── test_git.py
@@ -145,7 +152,7 @@ projects:
       max_concurrent_jobs: 1
 ```
 
-`git` is intentionally not a generic executable alias. Phase 7 uses a separate Git policy overlay.
+`git` is intentionally not a generic executable alias. Dedicated Git synchronization uses a separate policy overlay.
 
 If an executable lives inside the project, for example in `.venv`, pin it explicitly in the ignored base config:
 
@@ -157,7 +164,7 @@ allowed_executables:
 
 Do **not** enable `execute` merely because a command is allowlisted. Python, pytest, compilers, package managers, and build systems can execute project-controlled code and may modify files, access the network, or access anything available to the bridge OS account.
 
-## Configure Phase 7 Git synchronization
+## Configure Git synchronization
 
 Copy the tracked Git template to the ignored local overlay:
 
@@ -177,21 +184,15 @@ projects:
     max_output_bytes: 262144
 ```
 
-The overlay activates the Git capability only for the listed project. The local repository's configured `remote.<name>.url` must match the trusted overlay URL exactly.
+The overlay activates the Git capability only for listed projects. The local repository's configured `remote.<name>.url` must match the trusted overlay URL exactly.
 
-Phase 7 accepts HTTPS-only remote URLs without embedded credentials, query strings, or fragments. Interactive credential prompting and inherited credential helpers are intentionally disabled. This keeps the current synchronization boundary auditable; private-repository authentication that requires a credential integration is outside Phase 7.
-
-An alternate local overlay may be selected with:
-
-```text
-LOCAL_MCP_BRIDGE_GIT_CONFIG
-```
+The Git boundary accepts HTTPS-only remote URLs without embedded credentials, query strings, or fragments. Interactive credential prompting and inherited credential helpers are disabled. An alternate local overlay may be selected with `LOCAL_MCP_BRIDGE_GIT_CONFIG`.
 
 See [`docs/phase-7-git-sync.md`](docs/phase-7-git-sync.md) for the full Git security boundary.
 
 ## Current MCP tools
 
-Phase 7 exposes:
+Phase 8 retains the same narrow public tool surface:
 
 - `health_check()`;
 - `list_projects()`;
@@ -209,7 +210,7 @@ Phase 7 exposes:
 - `git_fetch(project_id)`;
 - `git_sync_fast_forward(project_id)`.
 
-There is no generic shell tool, arbitrary host executable path, caller-provided process environment, interactive stdin, filesystem-write MCP primitive, generic Git tool, Git push tool, or history-rewrite tool.
+There is no generic shell tool, arbitrary host executable path, caller-provided process environment, interactive stdin, filesystem-write MCP primitive, generic Git tool, Git push tool, history-rewrite tool, or raw audit-log reader.
 
 ## Filesystem confinement
 
@@ -219,7 +220,7 @@ That boundary is reused for process and job working directories.
 
 ## Controlled process execution
 
-`run_process(...)` validates the project, execution permission, executable alias, bounded argv, timeout, confined working directory, executable identity, child environment, output ceiling, and execution capacity before returning a structured result.
+`run_process(...)` validates project authorization, executable alias, bounded argv, timeout, confined working directory, executable identity, child environment, output ceiling, and execution capacity before returning a structured result.
 
 Hard execution ceilings include:
 
@@ -230,6 +231,8 @@ Hard execution ceilings include:
 - maximum individual argument length: 4096 characters;
 - maximum combined argument length: 16384 characters.
 
+In the configured Phase 8 runtime, execution also requires a successful persistent `process.run / attempt` audit event **before** the subprocess service is invoked.
+
 ## Persistent local job manager
 
 `start_job(...)` applies the same execution policy but returns an opaque job ID while the process continues under bridge supervision. Later calls can inspect metadata, poll bounded output, or request cancellation.
@@ -238,43 +241,78 @@ The configured runtime stores local job history under `runtime/jobs/` by default
 
 Persistent records deliberately contain no raw argv. State-file size, startup scan count, recovery bytes, retained history, active jobs, list sizes, and output pages are bounded. On restart, previously active records are marked `interrupted`; the bridge never blindly reattaches to a persisted PID.
 
-## Phase 7 Git synchronization
+Phase 8 requires successful pre-operation audit persistence before `start_job` and `cancel_job` may affect supervised process state.
 
-### Status
+## Constrained Git synchronization
 
-`git_status(project_id)` validates the repository and returns path-free metadata: current branch, configured branch, HEAD object ID, clean/dirty state, staged/unstaged/untracked counts, and optional ahead/behind counts. Changed filenames are deliberately not exposed by this high-level tool.
+`git_status(project_id)` returns path-free branch/HEAD/cleanliness and ahead/behind metadata. Changed filenames are deliberately not exposed.
 
-### Fetch
+`git_fetch(project_id)` fetches only the configured branch from the trusted local HTTPS URL into its configured remote-tracking ref. It does not accept caller-provided URL/refspec/flags.
 
-`git_fetch(project_id)` fetches only the configured branch from the trusted local HTTPS URL into:
+`git_sync_fast_forward(project_id)` requires the configured branch, zero staged/unstaged/untracked changes, a successful trusted fetch, post-fetch revalidation, an ancestor proof, `merge --ff-only --no-overwrite-ignore`, and final verification that `HEAD` equals the previously fetched object ID.
+
+`git_fetch` and `git_sync_fast_forward` are Phase 8 high-impact operations and require a persistent pre-operation audit event.
+
+## Phase 8 audit logging and runtime hardening
+
+The configured runtime writes operational audit events under:
 
 ```text
-refs/remotes/<configured-remote>/<configured-branch>
+runtime/audit/
 ```
 
-It does not fetch tags recursively, recurse into submodules, write `FETCH_HEAD`, or accept caller-provided URLs/refspecs.
+An alternate local directory may be selected with:
 
-### Fast-forward sync
+```text
+LOCAL_MCP_BRIDGE_AUDIT_DIR
+```
 
-`git_sync_fast_forward(project_id)` requires:
+An explicit override must be absolute. Unsafe redirecting path components, non-directories, redirecting/non-regular/hard-linked audit files, and unsafe rotation targets fail closed.
 
-1. the configured branch to be checked out;
-2. zero staged, unstaged, and untracked changes;
-3. a successful trusted fetch;
-4. the same branch and clean worktree after fetch;
-5. local `HEAD` to be an ancestor of the fetched remote head.
+Audit events are bounded JSONL metadata. Each event has a schema version, UTC timestamp, opaque session/event IDs, a session-local sequence number, fixed action/outcome, optional validated project ID, and allowlisted scalar details.
 
-Only then is a hook-disabled `--ff-only` update allowed, followed by verification that `HEAD` equals the fetched object ID. Divergence or local-ahead history is rejected rather than repaired with reset, rebase, merge commit, stash, or clean.
+The schema intentionally cannot record raw argv, stdout/stderr, search queries, caller file paths, file contents, executable targets, Git URLs, environment variables, credentials, tokens, headers, or arbitrary exception text.
+
+High-impact configured-runtime actions require successful persistent `attempt` logging before effect:
+
+```text
+run_process
+start_job
+cancel_job
+git_fetch
+git_sync_fast_forward
+```
+
+If the audit sink is unavailable, these actions are refused before reaching their underlying service. Read-only operations keep accurate tool semantics if a completion audit fails; instead, `health_check()` reports `status="degraded"` and `audit_healthy=false`.
+
+Audit growth is bounded:
+
+- active log: 4 MiB default, 64 MiB hard ceiling;
+- retained files: 5 default, 16 hard ceiling;
+- encoded event: 4096 bytes maximum;
+- detail fields: 16 maximum.
+
+Successful event writes are fsynced. On POSIX, local audit directory/file permissions are tightened to `0700`/`0600` as defense in depth.
+
+Raw audit files are deliberately **not** exposed as MCP model context. See [`docs/phase-8-audit-runtime-hardening.md`](docs/phase-8-audit-runtime-hardening.md).
+
+## Runtime isolation
+
+The pure `create_mcp_server(...)` factory is non-persistent by default. It does not load local project/Git config, persistent jobs, or audit directories. Persistent machine-local composition lives in `runtime.py`.
+
+This means test/server imports remain deterministic even when local runtime environment variables are invalid. The configured runtime, by contrast, deliberately fails closed on invalid explicit config or unsafe persistent runtime state.
 
 ## Residual risk
 
-Application-level policy cannot turn arbitrary native/interpreted code or Git into a sandboxed workload. Allowlisted project code may still access anything available to the bridge OS account. A local actor with equivalent OS privileges can race files/configuration between checks. A successful Phase 7 fast-forward intentionally modifies files inside the authorized working tree.
+Application-level policy cannot turn arbitrary native/interpreted code or Git into a sandboxed workload. Allowlisted project code may still access anything available to the bridge OS account. A local actor with equivalent OS privileges can race files/configuration/runtime state between checks. A successful fast-forward intentionally modifies files inside the authorized working tree.
+
+Phase 8 audit logging is operational accountability, not cryptographic non-repudiation. A local administrator or same-privilege actor can delete or alter local audit files. There is no remote trusted log sink or signing key in Phase 8.
 
 POSIX process termination can target the launched process group; portable Windows behavior guarantees the direct child but does not claim recursive descendant containment.
 
 ## Configuration policy
 
-Only templates belong in Git. Never commit real API keys, auth tokens, tunnel credentials, private certificates, personal machine configuration, local Git policy containing sensitive endpoints, or sensitive benchmark/job output.
+Only templates belong in Git. Never commit real API keys, auth tokens, tunnel credentials, private certificates, personal machine configuration, local Git policy containing sensitive endpoints, sensitive benchmark/job output, or runtime audit logs.
 
 Local-only paths include:
 
@@ -303,18 +341,18 @@ artifacts/
 - **Phase 5:** Controlled process execution — complete
 - **Phase 6:** Persistent local job manager — complete
 - **Phase 7:** Git synchronization tools — complete
-- **Phase 8:** Audit logging and runtime hardening
+- **Phase 8:** Audit logging and runtime hardening — complete
 - **Phase 9:** Remote/tunnel integration
 - **Phase 10:** Lightweight Claude MCP validation
 - **Phase 11:** Real project integration and autonomous workflow testing
 
 ## Future connector modularity
 
-The repository preserves a detailed future architecture proposal in [`future_modularity_expansion_proposal.md`](future_modularity_expansion_proposal.md). The current implementation finishes the local security/execution/synchronization foundations before generalizing the bridge into a multi-connector framework.
+The repository preserves a detailed future architecture proposal in [`future_modularity_expansion_proposal.md`](future_modularity_expansion_proposal.md). The current implementation finishes the local security/execution/synchronization/audit foundations before generalizing the bridge into a multi-connector framework.
 
 ## Current status
 
-**Phase 7 complete.** The bridge can inspect authorized project files, run bounded processes, supervise persistent background jobs, inspect trusted Git status, fetch one locally configured HTTPS branch, and advance a clean configured working tree by fast-forward only. Phase 8 will add audit logging and broader runtime hardening.
+**Phase 8 complete.** The bridge now combines confined read-only filesystem access, controlled process execution, persistent supervised jobs, constrained Git synchronization, and bounded metadata-only local auditing. High-impact configured-runtime actions fail closed when audit persistence is unavailable. Phase 9 will add authenticated encrypted remote/tunnel integration while preserving the local authorization boundary.
 
 ## License
 
