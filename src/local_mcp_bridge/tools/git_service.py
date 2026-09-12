@@ -204,7 +204,14 @@ class GitService:
                     )
 
                 await repository.run(
-                    ["merge", "--ff-only", "--no-edit", "--no-stat", repository.remote_ref]
+                    [
+                        "merge",
+                        "--ff-only",
+                        "--no-edit",
+                        "--no-stat",
+                        "--no-overwrite-ignore",
+                        repository.remote_ref,
+                    ]
                 )
                 current = await repository.rev_parse("HEAD")
                 if current != target:
