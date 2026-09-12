@@ -25,7 +25,10 @@ def test_disabled_audit_logger_is_hermetic(tmp_path: Path) -> None:
 
     assert logger.enabled is False
     assert logger.healthy is True
-    assert logger.record("runtime.bootstrap", "success", details={"projects_configured": 0}) is False
+    assert (
+        logger.record("runtime.bootstrap", "success", details={"projects_configured": 0})
+        is False
+    )
     assert list(tmp_path.iterdir()) == []
 
 
@@ -192,7 +195,7 @@ def test_server_audit_never_logs_paths_queries_contents_or_argv(tmp_path: Path) 
     assert str(project.resolve()) not in log_text
 
 
-def test_sensitive_operation_is_refused_when_enabled_audit_fails(tmp_path: Path) -> None:
+def test_sensitive_operation_is_refused_when_enabled_audit_fails() -> None:
     class BrokenAudit:
         enabled = True
         healthy = False
