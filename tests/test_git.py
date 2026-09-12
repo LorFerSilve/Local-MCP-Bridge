@@ -184,3 +184,41 @@ def test_fast_forward_sync_refuses_divergent_history(
         asyncio.run(service.git_sync_fast_forward("demo"))
 
     assert _git(project, "rev-parse", "HEAD") == local_head
+
+
+def test_fast_forward_sync_does_not_overwrite_ignored_local_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _ = _repo(tmp_path)
+    (project / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    _git(project, "add", ".gitignore")
+    _git(project, "commit", "-m", "ignore local file")
+    base = _git(project, "rev-parse", "HEAD")
+
+    (project / "ignored.txt").write_text("remote content\n", encoding="utf-8")
+    _git(project, "add", "-f", "ignored.txt")
+    _git(project, "commit", "-m", "track formerly ignored file")
+    target = _git(project, "rev-parse", "HEAD")
+
+    _git(project, "reset", "--hard", base)
+    (project / "ignored.txt").write_text("local private content\n", encoding="utf-8")
+    _git(project, "update-ref", "refs/remotes/origin/main", target)
+    service = _service(project)
+
+    async def fake_fetch(repository: object) -> GitFetchResult:
+        return GitFetchResult(
+            project_id="demo",
+            remote="origin",
+            branch="main",
+            previous_remote_head=target,
+            remote_head=target,
+            changed=False,
+        )
+
+    monkeypatch.setattr(service, "_fetch_locked", fake_fetch)
+    with pytest.raises(GitError, match="failed under the configured policy"):
+        asyncio.run(service.git_sync_fast_forward("demo"))
+
+    assert _git(project, "rev-parse", "HEAD") == base
+    assert (project / "ignored.txt").read_text(encoding="utf-8") == "local private content\n"
