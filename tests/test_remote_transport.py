@@ -129,20 +129,29 @@ def test_transport_rejects_untrusted_host_and_origin_before_mcp_dispatch() -> No
         app = create_remote_app(server, _settings(), TOKEN)
         transport = httpx2.ASGITransport(app=app)
 
-        async with httpx2.AsyncClient(
-            transport=transport,
-            base_url="http://127.0.0.1:8765",
-            headers={"Authorization": "Bearer " + TOKEN},
-        ) as client:
+        async with (
+            server.session_manager.run(),
+            httpx2.AsyncClient(
+                transport=transport,
+                base_url="http://127.0.0.1:8765",
+                headers={"Authorization": "Bearer " + TOKEN},
+            ) as client,
+        ):
             bad_host = await client.post(
                 "/mcp",
                 content=b"{}",
-                headers={"Host": "evil.example"},
+                headers={
+                    "Host": "evil.example",
+                    "Content-Type": "application/json",
+                },
             )
             bad_origin = await client.post(
                 "/mcp",
                 content=b"{}",
-                headers={"Origin": "https://evil.example"},
+                headers={
+                    "Origin": "https://evil.example",
+                    "Content-Type": "application/json",
+                },
             )
 
         assert bad_host.status_code == 421
