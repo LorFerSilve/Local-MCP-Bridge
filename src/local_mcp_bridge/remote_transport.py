@@ -30,6 +30,7 @@ ASGIApp = Callable[[ASGIScope, ASGIReceive, ASGISend], Awaitable[None]]
 REMOTE_HTTP_CONCURRENCY_LIMIT = 64
 REMOTE_HTTP_BACKLOG = 64
 REMOTE_KEEP_ALIVE_SECONDS = 5
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
 
 
 class BearerAuthMiddleware:
@@ -100,9 +101,6 @@ class BearerAuthMiddleware:
             await self._unauthorized(send)
             return
 
-        # The credential has served its transport-auth purpose. Do not expose it to
-        # downstream MCP request contexts. Proxy-Authorization is stripped as well so a
-        # tunnel/proxy credential can never be reflected by later application code.
         clean_scope = dict(scope)
         clean_scope["headers"] = [
             (key, value)
@@ -112,8 +110,14 @@ class BearerAuthMiddleware:
         await self._app(clean_scope, receive, send)
 
 
+def _require_loopback(settings: RemoteSettings) -> None:
+    if settings.bind_host not in _LOOPBACK_HOSTS:
+        raise RuntimeError("Remote transport may bind only to an explicit loopback address.")
+
+
 def create_remote_app(server: MCPServer, settings: RemoteSettings, token: str) -> ASGIApp:
     """Build the bearer-gated Streamable HTTP ASGI application without binding a socket."""
+    _require_loopback(settings)
     transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=list(settings.allowed_hosts),
@@ -134,11 +138,12 @@ def create_remote_app(server: MCPServer, settings: RemoteSettings, token: str) -
 def serve_remote(server: MCPServer, settings: RemoteSettings, token: str) -> None:
     """Serve the authenticated MCP app on loopback for an external HTTPS tunnel.
 
-    ``RemoteSettings`` cannot contain a non-loopback bind. Uvicorn is additionally told to
-    trust forwarded scheme/address metadata only from that loopback peer, which is the
-    expected tunnel/reverse-proxy process. Access logging is disabled to keep transport
-    metadata out of routine logs; MCP/tool activity is covered by the Phase 8 audit layer.
+    Uvicorn trusts forwarded scheme/address metadata only from the loopback peer expected to
+    be the local tunnel/reverse-proxy process. Access logging is disabled to keep transport
+    metadata out of routine logs; MCP/tool activity remains covered by the Phase 8 audit
+    layer.
     """
+    _require_loopback(settings)
     app = create_remote_app(server, settings, token)
     uvicorn.run(
         app,
