@@ -69,7 +69,8 @@ def _construct_unique_mapping(
         try:
             duplicate = key in mapping
         except TypeError as exc:
-            raise RemoteConfigError("Remote configuration mapping keys must be scalar values.") from exc
+            message = "Remote configuration mapping keys must be scalar values."
+            raise RemoteConfigError(message) from exc
         if duplicate:
             raise RemoteConfigError(f"Duplicate remote configuration key: {key!r}")
         mapping[key] = loader.construct_object(value_node, deep=deep)
@@ -109,8 +110,10 @@ def _parse_int(
 
 
 def _validate_dns_hostname(host: str) -> str:
-    normalized = host.rstrip(".").lower()
-    if not normalized or normalized != host.lower().rstrip("."):
+    if host.endswith("."):
+        raise RemoteConfigError("Remote public URL hostname may not end in a dot.")
+    normalized = host.lower()
+    if not normalized:
         raise RemoteConfigError("Remote public URL hostname is invalid.")
     if len(normalized) > 253 or not _HOST_PATTERN.fullmatch(normalized):
         raise RemoteConfigError("Remote public URL must use an ASCII DNS hostname.")
@@ -200,7 +203,11 @@ class RemoteSettings:
         )
 
 
-def load_remote_settings(path: str | Path, *, public_url_override: str | None = None) -> RemoteSettings:
+def load_remote_settings(
+    path: str | Path,
+    *,
+    public_url_override: str | None = None,
+) -> RemoteSettings:
     """Load and strictly validate one local remote-transport YAML file."""
     config_path = Path(path)
     try:
@@ -236,9 +243,17 @@ def load_remote_settings(path: str | Path, *, public_url_override: str | None = 
     bind_host = bind.get("host", DEFAULT_BIND_HOST)
     if not isinstance(bind_host, str) or bind_host not in _LOOPBACK_HOSTS:
         raise RemoteConfigError("Remote bind.host must be loopback-only: 127.0.0.1 or ::1.")
-    port = _parse_int(bind.get("port", DEFAULT_PORT), "Remote bind.port", minimum=1024, maximum=65_535)
+    port = _parse_int(
+        bind.get("port", DEFAULT_PORT),
+        "Remote bind.port",
+        minimum=1024,
+        maximum=65_535,
+    )
 
-    public_url_raw = public_url_override if public_url_override is not None else document.get("public_url")
+    if public_url_override is not None:
+        public_url_raw = public_url_override
+    else:
+        public_url_raw = document.get("public_url")
     public_url, public_host, public_origin = _parse_public_url(public_url_raw)
 
     limits = _expect_mapping(document.get("limits", {}), "remote limits")
