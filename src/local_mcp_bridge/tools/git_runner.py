@@ -210,6 +210,8 @@ class GitCommandRunner:
         "-c",
         "core.logAllRefUpdates=false",
         "-c",
+        f"core.autocrlf={'true' if os.name == 'nt' else 'false'}",
+        "-c",
         "credential.helper=",
         "-c",
         "core.askPass=",
