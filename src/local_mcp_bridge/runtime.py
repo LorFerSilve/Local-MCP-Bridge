@@ -8,15 +8,7 @@ bypass the existing security layers.
 
 from mcp.server import MCPServer
 
-from local_mcp_bridge.runtime_composition import (
-    AUDIT_DIR_ENV_VAR,
-    DEFAULT_AUDIT_DIR,
-    DEFAULT_JOB_STATE_DIR,
-    JOB_STATE_ENV_VAR,
-    audit_dir as _audit_dir,
-    create_runtime_composition,
-    job_state_dir as _job_state_dir,
-)
+from local_mcp_bridge.runtime_composition import create_runtime_composition
 
 
 def create_runtime_server() -> MCPServer:
