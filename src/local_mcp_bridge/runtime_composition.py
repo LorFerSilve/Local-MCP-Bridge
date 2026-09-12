@@ -1,6 +1,6 @@
 """Shared machine-local runtime composition for stdio and remote transports.
 
-Transport entry points must reuse this module so Streamable HTTP cannot accidentally skip
+Transport entry points reuse this module so Streamable HTTP cannot accidentally skip
 the project registry, Git overlay, persistent job manager, or Phase 8 audit boundary.
 Importing this module itself remains side-effect free; state is loaded only when
 ``create_runtime_composition`` is called.
@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from mcp.server import MCPServer
 
@@ -27,7 +26,6 @@ JOB_STATE_ENV_VAR = "LOCAL_MCP_BRIDGE_JOB_STATE_DIR"
 AUDIT_DIR_ENV_VAR = "LOCAL_MCP_BRIDGE_AUDIT_DIR"
 DEFAULT_JOB_STATE_DIR = Path("runtime/jobs")
 DEFAULT_AUDIT_DIR = Path("runtime/audit")
-RuntimeTransport = Literal["stdio", "streamable-http"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,17 +57,14 @@ def audit_dir() -> Path:
     return _runtime_directory(AUDIT_DIR_ENV_VAR, DEFAULT_AUDIT_DIR)
 
 
-def create_runtime_composition(transport: RuntimeTransport) -> RuntimeComposition:
+def create_runtime_composition() -> RuntimeComposition:
     """Create all configured services once, with identical policy for every transport."""
     registry = load_runtime_git_registry(load_runtime_registry())
     audit = AuditLogger(audit_dir())
     audit.record(
         "runtime.bootstrap",
         "attempt",
-        details={
-            "projects_configured": len(registry),
-            "transport": transport,
-        },
+        details={"projects_configured": len(registry)},
     )
 
     execution = ExecutionService(registry)
@@ -86,7 +81,6 @@ def create_runtime_composition(transport: RuntimeTransport) -> RuntimeCompositio
         details={
             "projects_configured": len(registry),
             "persistent_jobs": jobs.persistent,
-            "transport": transport,
         },
     )
     return RuntimeComposition(registry=registry, audit=audit, jobs=jobs, server=server)
