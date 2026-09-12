@@ -1,8 +1,9 @@
 """Runtime wiring for Local-MCP-Bridge.
 
 Unlike :mod:`local_mcp_bridge.server`, this module intentionally loads machine-local
-configuration and enables disk-backed job persistence. Reusable server-factory tests
-remain hermetic because only this runtime module touches local state.
+configuration, the optional local Git-policy overlay, and disk-backed job state.
+Reusable server-factory tests remain hermetic because only this runtime module touches
+machine-local state.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from pathlib import Path
 from mcp.server import MCPServer
 
 from local_mcp_bridge.config import load_runtime_registry
+from local_mcp_bridge.git_config import load_runtime_git_registry
 from local_mcp_bridge.jobs import JobManager
 from local_mcp_bridge.server import create_mcp_server
 from local_mcp_bridge.tools.execution import ExecutionService
@@ -33,8 +35,8 @@ def _job_state_dir() -> Path:
 
 
 def create_runtime_server() -> MCPServer:
-    """Create an MCP server using local project config and persistent job state."""
-    registry = load_runtime_registry()
+    """Create an MCP server using local project, Git, and persistent-job policy."""
+    registry = load_runtime_git_registry(load_runtime_registry())
     execution = ExecutionService(registry)
     jobs = JobManager(registry, execution, state_dir=_job_state_dir())
     return create_mcp_server(

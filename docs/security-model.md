@@ -2,11 +2,11 @@
 
 ## Trust model
 
-The bridge assumes model-generated calls, repository content, MCP input, filenames, paths, command arguments, child-process output, and persisted job state may be malicious or incorrect. Deterministic local policy is the authorization boundary; security never depends on the model behaving correctly.
+The bridge assumes model-generated calls, repository content, MCP input, filenames, paths, command arguments, child-process output, persisted job state, Git metadata, and repository-local Git configuration may be malicious or incorrect. Deterministic local policy is the authorization boundary; security never depends on the model behaving correctly.
 
 ## Deny by default
 
-Projects are registered explicitly. Capability flags are `read`, `search`, `execute`, and `git`; missing permissions are denied. `search: true` requires `read: true`. Execution requires `execute: true` plus a non-empty executable allowlist.
+Projects are registered explicitly. Capability flags are `read`, `search`, `execute`, and `git`; missing permissions are denied. `search: true` requires `read: true`. Execution requires `execute: true` plus a non-empty executable allowlist. Git synchronization is enabled only when the separate local Git-policy overlay supplies an explicit policy for that project.
 
 `security.deny_by_default` cannot be disabled and `security.allow_arbitrary_shell` cannot be enabled. Configurations attempting either change fail closed.
 
@@ -14,7 +14,7 @@ Projects are registered explicitly. Capability flags are `read`, `search`, `exec
 
 The registry maps AI-visible project IDs to canonical local roots. Absolute roots remain server-side. Roots must exist, be absolute directories, and may not overlap.
 
-Executable rules and execution settings are internal project data. Public metadata exposes executable aliases only; pinned host paths remain local.
+Executable rules, execution settings, and Git synchronization settings are internal project data. Public metadata exposes executable aliases and capability flags only; pinned host paths and trusted Git remote URLs remain local.
 
 Duplicate YAML keys, unknown project/permission/execution keys, invalid IDs, invalid permission combinations, invalid executable rules, and out-of-range limits fail closed.
 
@@ -160,14 +160,79 @@ Manager-level safety ceilings include:
 
 These limits control bridge state growth and startup work. They do not impose CPU, RAM, GPU, disk-write, or network quotas on executed code.
 
+## Phase 7 Git authorization boundary
+
+Git synchronization uses a dedicated `GitService`; it is not implemented as caller-controlled generic process execution. The MCP caller supplies only a logical `project_id`. Remote name, branch, HTTPS URL, timeout, and output ceiling come from a separate ignored local policy overlay.
+
+The public Phase 7 surface is intentionally limited to:
+
+- `git_status(project_id)`;
+- `git_fetch(project_id)`;
+- `git_sync_fast_forward(project_id)`.
+
+There is no Phase 7 push, commit, reset, clean, checkout/switch, rebase, cherry-pick, branch/tag mutation, force operation, arbitrary refspec, arbitrary URL, or arbitrary Git argv.
+
+If generic execution is enabled for the same project, a `git`/`git.exe` executable rule is rejected by the Phase 7 runtime policy. This prevents the bridge from intentionally publishing a generic Git bypass alongside the narrow synchronization API.
+
+## Git policy overlay and transport
+
+Git remains disabled unless the ignored local Git overlay contains an entry for the project. The trusted policy requires a conservative remote name and branch, an HTTPS URL without embedded credentials/query/fragment, and bounded timeout/output values.
+
+The configured URL must exactly match the repository's existing `remote.<name>.url`. The MCP request cannot replace the URL or branch.
+
+Git is launched without a shell, from a constrained absolute `PATH` outside the project root. System/global Git config, interactive prompting, credential helpers, AskPass, pagers, submodule recursion, automatic GC, and automatic maintenance are disabled or neutralized. Allowed transport is restricted to HTTPS.
+
+Line-ending behavior is deterministic for the bridge invocation: Phase 7 uses Windows-style `core.autocrlf=true` on Windows and `core.autocrlf=false` on POSIX rather than inheriting global/system Git settings that the security boundary intentionally disables.
+
+## Repository-local Git configuration
+
+Repository-local Git config is untrusted input. Before an exposed Git operation, Phase 7 validates the repository and rejects configuration namespaces/settings that can introduce command execution, external helpers, transport redirection, or policy bypass. This includes aliases, credential settings, filters, hooks, includes/includeIf, submodules, URL rewrites, merge drivers, HTTP/protocol overrides, SSH commands, external diff/filter commands, alternate-ref commands, and remote proxy/upload-pack/receive-pack overrides.
+
+The repository layout is also constrained. Phase 7 currently requires `.git` to be a real non-redirecting directory. Critical metadata files/directories are checked, hard-linked protected metadata is rejected, external object alternates are rejected, and `git rev-parse --show-toplevel` must resolve exactly to the configured project root.
+
+These checks are application-level defenses. A local actor with equivalent or greater OS privileges can still race repository metadata between checks.
+
+## Git status privacy
+
+`git_status` does not return changed filenames or local host paths. It exposes only branch/HEAD metadata, clean/dirty state, staged/unstaged/untracked counts, remote-tracking presence, and ahead/behind counts.
+
+This prevents routine status calls from reflecting attacker-controlled path strings back into the high-level MCP surface.
+
+## Fetch and synchronization policy
+
+`git_fetch` uses a fixed refspec from the configured branch to its configured remote-tracking ref. Tags are not fetched, submodules are not recursively fetched, and `FETCH_HEAD` is not written. The caller cannot select another source/destination ref.
+
+`git_sync_fast_forward` is more restrictive than a normal pull:
+
+1. validate repository metadata and local Git config;
+2. require the configured branch to be checked out;
+3. require staged, unstaged, and untracked counts to all be zero;
+4. fetch the configured branch into the configured remote-tracking ref;
+5. recheck branch and cleanliness;
+6. prove local `HEAD` is an ancestor of the fetched remote head;
+7. run `merge --ff-only` against that verified remote-tracking ref;
+8. verify resulting `HEAD` equals the fetched object ID.
+
+Divergence, local-ahead history, dirty state, detached/wrong branch, or any verification failure stops synchronization. Phase 7 does not resolve such states with reset, stash, merge commits, rebase, clean, or history rewriting.
+
+A successful fast-forward intentionally writes files inside the authorized working tree. It does not authorize remote mutation.
+
+## Git resource and concurrency limits
+
+Every Git subprocess uses a bounded timeout and combined stdout/stderr capture ceiling. Git operations are serialized per project with fail-fast behavior: if another Git operation is already active for that project, the new request is rejected rather than queued without a bound.
+
+Git subprocess output is not returned directly to the caller; the service parses only the narrow metadata required for the structured MCP result.
+
 ## Security boundary and residual risk
 
-Phases 5 and 6 are controlled application-level execution, not an operating-system sandbox. Granting `execute: true` authorizes selected programs to run under the bridge account, and those programs may execute project-controlled code.
+Phases 5 through 7 are controlled application-level capabilities, not an operating-system sandbox. Granting `execute: true` authorizes selected programs to run under the bridge account, and enabling Git synchronization authorizes the bridge to read Git metadata, contact the configured HTTPS remote, update the configured remote-tracking ref, and fast-forward a clean authorized working tree.
 
-The bridge mitigates unapproved executable selection, shell-string injection, unsafe launch cwd, accidental full-environment inheritance, excessive argv/output/runtime, unbounded bridge-managed concurrency/state, stale persisted authorization, and unsafe PID reattachment. It does not contain intentionally hostile code, prevent child filesystem writes/network access, or guarantee descendant-process containment on every platform.
+The bridge mitigates unapproved executable selection, shell-string injection, unsafe launch cwd, accidental full-environment inheritance, excessive argv/output/runtime, unbounded bridge-managed concurrency/state, stale persisted authorization, unsafe PID reattachment, arbitrary Git command selection, Git transport redirection, and destructive/non-fast-forward synchronization.
 
-## Git, audit, and network exposure
+It does not contain intentionally hostile native/interpreted code or a compromised Git binary, prevent all races by an equally privileged local actor, provide a network sandbox, or prove every Git object/parser path safe against an already-compromised host.
 
-Dedicated Git MCP operations remain deferred to Phase 7 so destructive Git behavior receives narrow policy. Broader audit logging and runtime hardening belong to Phase 8. Development transport remains local stdio; future remote access must use authenticated encrypted transport while retaining all local authorization checks.
+## Audit and network exposure
+
+Broader audit logging and runtime hardening belong to Phase 8. Development transport remains local stdio; future remote access must use authenticated encrypted transport while retaining all local authorization checks.
 
 Direct filesystem write/delete/rename MCP primitives remain separate and require their own reviewed policy and recovery semantics before introduction.

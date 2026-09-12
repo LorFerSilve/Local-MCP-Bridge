@@ -10,82 +10,110 @@ Local-MCP-Bridge is a narrow, policy-enforced boundary between an MCP client and
 MCP client / AI agent
         |
         v
-+---------------------------+
-| Runtime composition root  |
-| - loads ignored config    |
-| - builds registry         |
-| - enables local job state |
-+-------------+-------------+
-              v
-+---------------------------+
-| MCP tool layer            |
-| - project metadata        |
-| - read-only filesystem    |
-| - one-shot execution      |
-| - managed background jobs |
-+------+------+-------------+
-       |      |
-       |      +-------------------------+
-       |                                |
-       v                                v
-+-------------+                +-------------------+
-| Filesystem  |                | JobManager        |
-| service     |                | - opaque job IDs  |
-| + limits    |                | - status/output   |
-+------+------+                | - cancellation    |
-       |                       | - bounded history |
-       |                       | - restart recovery|
-       |                       +---------+---------+
-       |                                 |
-       |                         +-------+-------+
-       |                         |               |
-       |                         v               v
-       |                +-------------------+  runtime/jobs/
-       |                | ExecutionService  |  local state
-       |                | - execute permit  |
-       |                | - alias allowlist |
-       |                | - argv/env limits |
-       |                | - timeout/output  |
-       |                +---------+---------+
-       |                          |
-       +-------------+------------+
-                     v
-+---------------------------+
-| PathGuard confinement     |
-| - lexical validation      |
-| - lstat component checks  |
-| - reparse/link rejection  |
-| - canonical containment   |
-| - identity verification   |
-+-------------+-------------+
-              |
-       +------+------+
++--------------------------------+
+| Runtime composition root       |
+| - loads ignored base config    |
+| - applies ignored Git overlay  |
+| - enables persistent job state |
++---------------+----------------+
+                v
++--------------------------------+
+| MCP tool layer                 |
+| - project metadata             |
+| - read-only filesystem         |
+| - one-shot execution           |
+| - managed background jobs      |
+| - constrained Git sync         |
++------+-------------+-----------+
        |             |
-       v             v
- local filesystem   direct subprocess
-                   (no shell)
+       |             +-----------------------------+
+       |                                           |
+       v                                           v
++-------------+                           +----------------------+
+| Filesystem  |                           | GitService           |
+| service     |                           | - status             |
+| + limits    |                           | - trusted fetch      |
++------+------+                           | - clean FF-only sync |
+       |                                  +----------+-----------+
+       |                                             |
+       |                                  +----------v-----------+
+       |                                  | GitRepository        |
+       |                                  | - .git validation    |
+       |                                  | - config audit       |
+       |                                  | - trusted remote     |
+       |                                  +----------+-----------+
+       |                                             |
+       |                                  +----------v-----------+
+       |                                  | GitCommandRunner     |
+       |                                  | - constrained PATH   |
+       |                                  | - minimal env        |
+       |                                  | - HTTPS protocol     |
+       |                                  | - bounded execution  |
+       |                                  +----------+-----------+
+       |                                             |
+       |                                             v
+       |                                         git process
+       |
+       +-------------------+
+                           |
+                           v
+                  +-------------------+
+                  | PathGuard         |
+                  | confinement       |
+                  +--------+----------+
+                           |
+                           v
+                    local filesystem
+
+MCP job tools
+       |
+       v
++-------------------+
+| JobManager        |
+| - opaque job IDs  |
+| - persistence     |
+| - recovery        |
++---------+---------+
+          |
+          v
++-------------------+
+| ExecutionService  |
+| - execute permit  |
+| - alias allowlist |
+| - argv/env limits |
+| - timeout/output  |
++---------+---------+
+          |
+          v
+   direct subprocess
+      (no shell)
 ```
 
-## Active Phase 6 modules
+## Active Phase 7 modules
 
 ```text
 src/local_mcp_bridge/
 ├── config.py
+├── git_config.py
 ├── jobs.py
 ├── registry.py
 ├── runtime.py
 ├── server.py
 ├── security/
-│   ├── __init__.py
 │   └── paths.py
 └── tools/
     ├── execution.py
-    └── filesystem.py
+    ├── filesystem.py
+    ├── git_repository.py
+    ├── git_runner.py
+    └── git_service.py
 ```
 
-`config.py` parses local YAML and constructs the immutable project registry.
+`config.py` parses the base local YAML and constructs the immutable project registry.
 
-`registry.py` maps logical project IDs to canonical roots and host-only executable rules. Public project metadata exposes executable aliases, never pinned absolute executable paths.
+`git_config.py` applies the separate local-only Phase 7 Git overlay. The overlay binds a logical project ID to one trusted remote name, one branch, one HTTPS URL, and bounded Git resource limits. Applying the overlay turns on that project's Git capability; MCP request data never supplies those values.
+
+`registry.py` maps logical project IDs to canonical roots and host-only executable/Git rules. Public project metadata exposes capability flags and executable aliases but not absolute roots, pinned executable paths, or trusted remote URLs.
 
 `tools/filesystem.py` owns project read/search permissions, sensitive-path filtering, text/binary policy, output shaping, and filesystem resource ceilings.
 
@@ -93,9 +121,15 @@ src/local_mcp_bridge/
 
 `tools/execution.py` owns controlled process execution: permission checks, executable aliases, constrained executable resolution, argv validation, minimal child environments, shell-free process creation, timeout/output enforcement, concurrency limits, output sanitization, and project-root redaction.
 
-`jobs.py` owns Phase 6 background-job lifecycle and bounded persistence. It delegates actual process creation and termination to `ExecutionService` so background execution cannot bypass Phase 5 policy.
+`jobs.py` owns background-job lifecycle and bounded persistence. It delegates process creation and termination to `ExecutionService` so background execution cannot bypass Phase 5 policy.
 
-`server.py` remains a pure MCP factory. By default it uses an in-memory job manager, which keeps imports and tests free of machine-local state. `runtime.py` is the composition root that loads ignored local configuration and installs the disk-backed job manager.
+`tools/git_runner.py` is a separate Git-only process primitive. It does not accept arbitrary MCP argv. It resolves Git outside the project root from a constrained absolute `PATH`, launches without a shell, applies a minimal environment, disables system/global Git config and interactive authentication, limits transport to HTTPS, disables hooks/submodule recursion/automatic maintenance, and enforces timeout/output ceilings.
+
+`tools/git_repository.py` validates the repository trust boundary before Git operations. It validates `.git` metadata, exact worktree identity, local Git configuration, configured remote URL, and status/ref helpers.
+
+`tools/git_service.py` implements the only public Git semantics: path-free status, configured-branch fetch, and clean fast-forward synchronization. It serializes Git operations per project and fails concurrent operations immediately.
+
+`server.py` remains a pure MCP factory. By default it creates in-memory/non-persistent services suitable for tests. `runtime.py` is the composition root that loads base config, applies the optional Git overlay, and installs disk-backed job state.
 
 ## Project identity boundary
 
@@ -105,9 +139,12 @@ Clients address logical IDs and project-relative paths:
 read_file(project_id="example-project", path="src/main.py")
 run_process(project_id="example-project", executable="pytest", args=["-q"], cwd=".")
 start_job(project_id="example-project", executable="pytest", args=["-q"], cwd=".")
+git_status(project_id="example-project")
+git_fetch(project_id="example-project")
+git_sync_fast_forward(project_id="example-project")
 ```
 
-Clients do not choose a host project root, job-state directory, or arbitrary executable path per call.
+Clients do not choose a host root, job-state directory, executable path, Git binary, remote URL, remote name, branch, refspec, protocol, or raw Git arguments per call.
 
 ## Path-confinement flow
 
@@ -147,7 +184,7 @@ bounded I/O
 
 The full parent environment is not inherited, stdin is disabled, stdout/stderr share a bounded capture budget, and timeout/output-limit termination is enforced. POSIX termination targets the launched process group. On Windows, the portable Python primitive guarantees termination of the direct child but not every descendant.
 
-## Phase 6 managed-job model
+## Managed-job model
 
 Longer work uses the job manager:
 
@@ -186,66 +223,187 @@ get_job_output(job_id, stream, offset, max_chars)
 cancel_job(job_id)
 ```
 
-`cancel_job` cancels the supervised task; cancellation propagates into `ExecutionService`, which terminates the process using the same Phase 5 termination policy.
-
 ## Persistent state boundary
 
 The configured runtime stores job records below `runtime/jobs/` by default. `LOCAL_MCP_BRIDGE_JOB_STATE_DIR` can select another absolute path. The state directory is local-only and ignored by Git.
 
-Each record contains safe metadata and already-sanitized terminal output. Raw command arguments are deliberately absent because argv may contain credentials or private data.
+Each record contains safe metadata and already-sanitized terminal output. Raw command arguments are deliberately absent. Persistence uses exclusive temporary files, flush/fsync, and atomic replacement. Runtime-state paths and recovered records are treated as untrusted input and are reauthorized against current policy.
 
-Persistence uses exclusive temporary files, flush/fsync, and atomic replacement. On POSIX the bridge applies restrictive directory/file modes as defense in depth. This is application-level hardening; it is not a substitute for OS account isolation or Windows ACL policy.
+A persisted `starting`, `running`, or `cancelling` record is converted to `interrupted` on startup. Phase 6 deliberately does not persist a PID and later reattach to it because PID reuse makes blind reattachment unsafe.
 
-Runtime-state path components are inspected without following redirecting links. Recovery rejects symlink/junction/reparse state paths, hard-linked or non-regular state files, malformed schemas/types, invalid IDs/timestamps/statuses, and oversized records.
+## Phase 7 Git policy composition
 
-Actual state-file reads reuse `PathGuard.read_bounded`, including identity checks around the open. Recovery is additionally bounded by history count, directory scan count, per-file size, and a total startup byte budget.
+Git configuration is deliberately split from the base project config:
 
-## Recovery and reauthorization
+```text
+config/config.yaml
+    |
+    v
+load_runtime_registry()
+    |
+    v
+base ProjectRegistry (git disabled)
+    |
+    +---- config/git.local.yaml or LOCAL_MCP_BRIDGE_GIT_CONFIG
+    |
+    v
+load_runtime_git_registry(...)
+    |
+    v
+ProjectRegistry with selected projects carrying GitSettings + git=true
+```
 
-Persisted state is untrusted input. A recovered record is admitted only when the current registry still contains its project, `execute` remains enabled, and its executable alias is still allowlisted. Output and error strings are sanitized and project-root-redacted again during recovery rather than trusting the bytes previously written to disk.
+This preserves backwards compatibility for existing local config while making Git activation an explicit second capability grant.
 
-Terminal jobs can therefore survive a bridge restart without reopening authorization that has since been revoked.
+The Git overlay is ignored by Git and rejects duplicate/unknown keys, unknown projects, unsafe remote/branch names, non-HTTPS URLs, embedded credentials, and limits beyond hard ceilings.
 
-A persisted `starting`, `running`, or `cancelling` record is converted to `interrupted` on startup. Phase 6 deliberately does not persist a PID and later reattach to it: PID reuse makes blind reattachment/termination unsafe. If the bridge process crashes, an OS child may survive independently; the recovered metadata does not imply that supervision resumed.
+## Git repository-validation boundary
 
-## Output semantics
+Before each exposed Git operation:
 
-The underlying Phase 5 runner captures output under a byte ceiling and sanitizes/redacts it before returning a result. Phase 6 stores that bounded terminal output and serves character-offset pages.
+```text
+authorized project + GitSettings
+       |
+       v
+validate .git is a real directory
+       |
+       +-- reject gitfile/worktree indirection
+       +-- reject external object alternates / commondir
+       +-- inspect critical metadata files
+       +-- inspect existing remote-ref directories
+       |
+       v
+git rev-parse --show-toplevel
+       |
+       +-- must resolve exactly to authorized project root
+       |
+       v
+audit repository-local Git config
+       |
+       +-- reject command-execution / transport-redirection capabilities
+       |
+       v
+verify remote.<configured>.url == trusted overlay URL
+```
 
-The current job manager does not promise live durable streaming while a process is running. Output becomes durable when the underlying invocation finalizes. This keeps Phase 6 persistence simple and avoids presenting partial state as a durable log protocol.
+Repository-local configuration is not trusted merely because it sits under `.git`. High-risk namespaces include aliases, credential configuration, filters, hooks, includes, submodules, URL rewrites, merge drivers, HTTP/protocol overrides, external diff/filter commands, worktree/partial-clone redirection, and remote overrides beyond the permitted configured URL/fetch metadata.
+
+## Git runner boundary
+
+The Git runner is distinct from `ExecutionService` because Git has different policy requirements. It:
+
+- resolves a system Git binary only from validated absolute PATH directories outside the project;
+- rejects redirecting/non-regular Git executable paths and rechecks executable identity;
+- launches with direct argv and no shell;
+- builds a minimal child environment instead of forwarding arbitrary parent credentials/config;
+- disables system/global Git config;
+- disables interactive terminal authentication and inherited credential helpers;
+- restricts protocol use to HTTPS;
+- disables hooks, fsmonitor, submodule recursion, reflog updates for Phase 7 commands, auto-GC, and auto-maintenance;
+- bounds combined output and runtime.
+
+Generic execution and Git synchronization are separate capabilities. The runtime refuses to enable generic `execute` with an allowlisted `git`/`git.exe` command, preventing an obvious bypass of the Phase 7 API.
+
+## Git status flow
+
+`git_status` returns only path-free metadata:
+
+```text
+validate repository
+       |
+       v
+current branch + HEAD
+       |
+       v
+porcelain status (internal)
+       |
+       +-- count staged / unstaged / untracked
+       +-- do not return filenames
+       |
+       v
+optional remote-tracking ref
+       |
+       +-- compute ahead/behind counts when present
+```
+
+## Git fetch flow
+
+The fetch target is fixed by trusted local policy:
+
+```text
+refs/heads/<branch>
+       |
+       v
+refs/remotes/<remote>/<branch>
+```
+
+The caller cannot alter the source URL, destination ref, branch, flags, or protocol. Tags and recursive submodules are disabled and `FETCH_HEAD` is not written.
+
+## Fast-forward synchronization flow
+
+```text
+validate repository
+       |
+       v
+require configured branch checked out
+       |
+       v
+require zero staged / unstaged / untracked changes
+       |
+       v
+fetch configured branch from trusted HTTPS URL
+       |
+       v
+revalidate repository + branch + clean state
+       |
+       v
+capture local HEAD and verified fetched target
+       |
+       +-- same? return no-op
+       |
+       v
+merge-base --is-ancestor HEAD <remote-ref>
+       |
+       +-- no -> reject divergence/local-ahead state
+       |
+       v
+merge --ff-only --no-edit --no-stat <remote-ref>
+       |
+       v
+verify new HEAD == previously verified fetched target
+```
+
+Phase 7 never resolves a conflict or divergence with reset, clean, stash, rebase, merge commit, force, or history rewriting.
 
 ## Resource boundaries
 
-Phase 6 adds manager-level ceilings on top of Phase 5 process ceilings:
+Process/job ceilings remain from Phases 5–6. Phase 7 adds:
 
-- 32 active managed jobs globally;
-- 512 retained terminal records maximum, 128 by default;
-- 100 records returned by one list call;
-- 131072 characters returned by one output-page call;
-- 8 MiB maximum per state file;
-- 1024 candidate state files examined at startup;
-- 64 MiB maximum candidate bytes attempted during startup recovery;
-- 4 MiB maximum recovered stdout/stderr characters per admitted record.
+- at most one bridge-managed Git operation per project at a time;
+- Git timeout hard ceiling: 120 seconds;
+- combined Git output hard ceiling: 1 MiB;
+- conservative branch/remote-name limits;
+- 256 KiB maximum local Git-policy overlay.
 
-These are denial-of-service controls, not CPU/RAM/GPU/network sandboxing of executed code.
+These are application-level denial-of-service controls, not CPU/RAM/network sandboxing of Git or project code.
 
 ## Test/runtime isolation
 
 ```text
-pytest -> pure server factory + in-memory JobManager + tmp_path registries
-runtime -> load_runtime_registry() -> disk-backed JobManager
+pytest -> pure server factory + injected/tmp registries + local temp Git repos
+runtime -> base config -> optional Git overlay -> disk-backed JobManager
 ```
 
-Machine-local `config/config.yaml` and `runtime/jobs/` cannot become implicit dependencies of reusable server tests.
+Machine-local `config/config.yaml`, `config/git.local.yaml`, and `runtime/jobs/` are not implicit dependencies of reusable server tests.
 
 ## Security boundary
 
-Phases 5 and 6 are application-level security layers, not an OS sandbox. `execute=true` means the operator intentionally allows selected programs to run under the bridge account. A programmable executable may execute project-controlled code that can access resources available to that account.
+Phases 5–7 are application-level security layers, not an OS sandbox. `execute=true` means selected programs can run under the bridge account. `git=true` means the bridge may intentionally fetch objects and fast-forward the authorized working tree under the pinned local Git policy.
 
-The bridge constrains *selection and orchestration*: project, executable alias, cwd-at-launch, argv shape, environment inheritance, timeout, captured output, concurrency, persistent metadata, and restart behavior. It does not contain intentionally hostile code.
+A local actor with equivalent OS privileges can race filesystem/Git metadata between checks. The policy is designed to constrain model-driven capability selection and remove known Git command-execution/redirection surfaces; it does not claim containment of an already-compromised host or hostile replacement Git binary supplied by the host administrator.
 
 ## Future boundaries
 
-Phase 7 adds dedicated Git synchronization tools so Git operations receive narrow policy instead of being treated as generic shell commands. Phase 8 adds broader audit logging and runtime hardening. Remote transport remains deferred until authenticated encrypted exposure can preserve the same local authorization boundary.
+Phase 8 adds audit logging and broader runtime hardening. Phase 9 adds remote/tunnel integration only after authenticated encrypted exposure can preserve the same local authorization boundary.
 
 Long-term connector modularity is documented separately in `future_modularity_expansion_proposal.md`.

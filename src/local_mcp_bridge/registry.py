@@ -1,8 +1,8 @@
-"""Project registry, permissions, and execution policy metadata.
+"""Project registry, permissions, execution, and Git policy metadata.
 
 The registry is the security boundary between MCP-facing project identifiers and
-host-specific filesystem roots/executable paths. Absolute host paths are never
-exposed through public project metadata.
+host-specific filesystem roots/executable paths. Absolute host paths and trusted
+Git remote URLs are never exposed through public project metadata.
 """
 
 from __future__ import annotations
@@ -12,14 +12,19 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
+from urllib.parse import urlsplit
 
 from typing_extensions import TypedDict
 
 PROJECT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 EXECUTABLE_ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
+GIT_REMOTE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+GIT_BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 ABSOLUTE_MAX_TIMEOUT_SECONDS = 300
 ABSOLUTE_MAX_OUTPUT_BYTES = 1_048_576
 ABSOLUTE_MAX_CONCURRENT_JOBS = 4
+ABSOLUTE_MAX_GIT_TIMEOUT_SECONDS = 120
+ABSOLUTE_MAX_GIT_OUTPUT_BYTES = 1_048_576
 
 
 class RegistryError(ValueError):
@@ -136,6 +141,61 @@ class ExecutionSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class GitSettings:
+    """Trusted, local-only synchronization policy for one project."""
+
+    remote: str
+    branch: str
+    remote_url: str
+    timeout_seconds: int = 60
+    max_output_bytes: int = 262_144
+
+    def __post_init__(self) -> None:
+        if not GIT_REMOTE_PATTERN.fullmatch(self.remote):
+            raise RegistryError(
+                "Git remote names must contain only letters, digits, '.', '_', or '-' "
+                "and be at most 64 characters."
+            )
+        if (
+            not GIT_BRANCH_PATTERN.fullmatch(self.branch)
+            or ".." in self.branch
+            or "//" in self.branch
+            or "@{" in self.branch
+            or self.branch.endswith(("/", ".", ".lock"))
+            or "/." in self.branch
+        ):
+            raise RegistryError("Git branch name is outside the conservative Phase 7 policy.")
+
+        parsed = urlsplit(self.remote_url)
+        if (
+            parsed.scheme.casefold() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path
+        ):
+            raise RegistryError(
+                "Git remote_url must be an HTTPS URL without embedded credentials, "
+                "query, or fragment."
+            )
+
+        if type(self.timeout_seconds) is not int or not (
+            1 <= self.timeout_seconds <= ABSOLUTE_MAX_GIT_TIMEOUT_SECONDS
+        ):
+            raise RegistryError(
+                f"Git timeout must be between 1 and {ABSOLUTE_MAX_GIT_TIMEOUT_SECONDS} seconds."
+            )
+        if type(self.max_output_bytes) is not int or not (
+            4_096 <= self.max_output_bytes <= ABSOLUTE_MAX_GIT_OUTPUT_BYTES
+        ):
+            raise RegistryError(
+                "Git output limit must be between 4096 bytes and the hard 1 MiB ceiling."
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectRecord:
     """Internal project record containing canonical host-only configuration."""
 
@@ -144,9 +204,10 @@ class ProjectRecord:
     permissions: ProjectPermissions
     allowed_executables: tuple[ExecutableRule, ...] = ()
     execution: ExecutionSettings = field(default_factory=ExecutionSettings)
+    git: GitSettings | None = None
 
     def as_public(self) -> PublicProject:
-        """Return metadata without leaking local filesystem/executable paths."""
+        """Return metadata without leaking local filesystem/executable/Git details."""
         return PublicProject(
             id=self.project_id,
             permissions=self.permissions.as_public(),
@@ -201,6 +262,12 @@ class ProjectRegistry:
                     )
                 aliases.add(alias_key)
 
+            if project.permissions.git and project.git is None:
+                raise RegistryError(
+                    f"Project {project.project_id!r} enables Git without a Git "
+                    "synchronization policy."
+                )
+
             by_id[project.project_id] = project
             roots.append(root_key)
 
@@ -219,7 +286,7 @@ class ProjectRegistry:
         return [self._projects[key].as_public() for key in sorted(self._projects)]
 
     def get_public(self, project_id: str) -> PublicProject | None:
-        """Return MCP-safe metadata for one project, if it exists."""
+        """Return MCP-safe metadata for one project ID, if it exists."""
         project = self._projects.get(project_id)
         return project.as_public() if project is not None else None
 

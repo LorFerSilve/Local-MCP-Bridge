@@ -195,13 +195,29 @@ class _JobRecord:
     persistent: bool = False
     task: asyncio.Task[None] | None = field(default=None, repr=False)
 
+    def visible_status(self) -> JobStatus:
+        """Do not publish a terminal state until its supervising task fully finalizes.
+
+        Persistent jobs write their terminal record before ``_run_job`` returns. Keeping
+        the public status active during that tiny finalization window guarantees that a
+        caller cannot observe ``succeeded`` and immediately restart the manager while the
+        durable state file still says ``running``.
+        """
+        if (
+            self.task is not None
+            and not self.task.done()
+            and self.status in _TERMINAL_STATUSES
+        ):
+            return "running"
+        return self.status
+
     def summary(self) -> JobSummary:
         return JobSummary(
             job_id=self.job_id,
             project_id=self.project_id,
             executable=self.executable,
             cwd=self.cwd,
-            status=self.status,
+            status=self.visible_status(),
             created_at=self.created_at,
             started_at=self.started_at,
             finished_at=self.finished_at,
@@ -530,11 +546,12 @@ class JobManager:
         if offset > len(text):
             raise JobError("offset exceeds the currently available stream length.")
         end = min(len(text), offset + max_chars)
-        terminal = record.status in _TERMINAL_STATUSES
+        visible_status = record.visible_status()
+        terminal = visible_status in _TERMINAL_STATUSES
         return JobOutputResult(
             job_id=record.job_id,
             stream=stream,
-            status=record.status,
+            status=visible_status,
             data=text[offset:end],
             offset=offset,
             next_offset=end,
