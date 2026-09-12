@@ -4,6 +4,7 @@ from mcp.server import MCPServer
 from typing_extensions import TypedDict
 
 from local_mcp_bridge import __version__
+from local_mcp_bridge.audit import AuditError, AuditLogger
 from local_mcp_bridge.jobs import (
     DEFAULT_LIST_LIMIT,
     DEFAULT_OUTPUT_CHARS,
@@ -47,6 +48,8 @@ class HealthStatus(TypedDict):
     jobs_enabled: bool
     persistent_jobs: bool
     git_enabled: bool
+    audit_enabled: bool
+    audit_healthy: bool
 
 
 class ProjectListStatus(TypedDict):
@@ -62,18 +65,50 @@ class ProjectLookupStatus(TypedDict):
     project: PublicProject | None
 
 
+def _audit_event(
+    audit: AuditLogger,
+    action: str,
+    outcome: str,
+    *,
+    project_id: str | None = None,
+    details: dict[str, str | int | bool | None] | None = None,
+    strict: bool = False,
+) -> None:
+    """Record metadata without letting audit failures hide ordinary read results.
+
+    Security-sensitive operations call this with ``strict=True`` *before* causing an
+    effect. The configured runtime therefore refuses new execution/job/Git mutations if
+    its audit log becomes unavailable. Completion logging is deliberately non-strict:
+    once an effect happened, returning an artificial failure cannot undo it. A failed
+    completion write marks the logger unhealthy so the next strict attempt fails closed.
+    """
+    try:
+        audit.record(
+            action,
+            outcome,
+            project_id=project_id,
+            details=details,
+        )
+    except AuditError as exc:
+        if strict:
+            raise RuntimeError(
+                "Audit logging is unavailable; security-sensitive operation refused."
+            ) from exc
+
+
 def create_mcp_server(
     registry: ProjectRegistry | None = None,
     filesystem_limits: FilesystemLimits | None = None,
     execution_service: ExecutionService | None = None,
     job_manager: JobManager | None = None,
     git_service: GitService | None = None,
+    audit_logger: AuditLogger | None = None,
 ) -> MCPServer:
     """Create a bridge server bound to explicitly supplied runtime services.
 
     This factory intentionally avoids machine-local config and persistent state.
-    The real runtime module supplies the Git-enabled registry and disk-backed jobs;
-    tests can inject in-memory services.
+    The real runtime module supplies the Git-enabled registry, disk-backed jobs, and
+    persistent audit logger; tests can inject in-memory services or leave auditing off.
     """
     active_registry = registry if registry is not None else ProjectRegistry.empty()
     filesystem = FilesystemService(active_registry, filesystem_limits)
@@ -83,13 +118,14 @@ def create_mcp_server(
     execution = execution_service or ExecutionService(active_registry)
     jobs = job_manager or JobManager(active_registry, execution)
     git = git_service or GitService(active_registry)
+    audit = audit_logger or AuditLogger()
     server = MCPServer(SERVER_NAME)
 
     @server.tool()
     def health_check() -> HealthStatus:
         """Return basic bridge health without exposing host filesystem paths."""
         return HealthStatus(
-            status="ok",
+            status="ok" if audit.healthy else "degraded",
             server=SERVER_NAME,
             version=__version__,
             projects_configured=len(active_registry),
@@ -98,6 +134,8 @@ def create_mcp_server(
             jobs_enabled=True,
             persistent_jobs=jobs.persistent,
             git_enabled=True,
+            audit_enabled=audit.enabled,
+            audit_healthy=audit.healthy,
         )
 
     @server.tool()
@@ -108,13 +146,21 @@ def create_mcp_server(
     @server.tool()
     def get_project(project_id: str) -> ProjectLookupStatus:
         """Return public metadata for one project ID without exposing its local root."""
-        project = active_registry.get_public(project_id)
-        return ProjectLookupStatus(found=project is not None, project=project)
+        return ProjectLookupStatus(
+            found=(project := active_registry.get_public(project_id)) is not None,
+            project=project,
+        )
 
     @server.tool()
     def list_directory(project_id: str, path: str = ".") -> DirectoryListResult:
         """List a bounded directory inside an authorized project root."""
-        return filesystem.list_directory(project_id, path)
+        try:
+            result = filesystem.list_directory(project_id, path)
+        except Exception:
+            _audit_event(audit, "filesystem.list_directory", "error", project_id=project_id)
+            raise
+        _audit_event(audit, "filesystem.list_directory", "success", project_id=project_id)
+        return result
 
     @server.tool()
     def read_file(
@@ -124,7 +170,19 @@ def create_mcp_server(
         max_lines: int = DEFAULT_READ_LINES,
     ) -> ReadFileResult:
         """Read a bounded UTF-8 text slice from an authorized project file."""
-        return filesystem.read_file(project_id, path, start_line, max_lines)
+        try:
+            result = filesystem.read_file(project_id, path, start_line, max_lines)
+        except Exception:
+            _audit_event(audit, "filesystem.read_file", "error", project_id=project_id)
+            raise
+        _audit_event(
+            audit,
+            "filesystem.read_file",
+            "success",
+            project_id=project_id,
+            details={"requested_max_lines": max_lines},
+        )
+        return result
 
     @server.tool()
     def search_text(
@@ -135,13 +193,28 @@ def create_mcp_server(
         max_results: int = DEFAULT_SEARCH_RESULTS,
     ) -> SearchTextResult:
         """Search authorized UTF-8 project files using a bounded plain-text query."""
-        return filesystem.search_text(
-            project_id,
-            query,
-            path,
-            case_sensitive,
-            max_results,
+        try:
+            result = filesystem.search_text(
+                project_id,
+                query,
+                path,
+                case_sensitive,
+                max_results,
+            )
+        except Exception:
+            _audit_event(audit, "filesystem.search_text", "error", project_id=project_id)
+            raise
+        _audit_event(
+            audit,
+            "filesystem.search_text",
+            "success",
+            project_id=project_id,
+            details={
+                "case_sensitive": case_sensitive,
+                "requested_max_results": max_results,
+            },
         )
+        return result
 
     @server.tool()
     async def run_process(
@@ -152,13 +225,40 @@ def create_mcp_server(
         timeout_seconds: int | None = None,
     ) -> ProcessResult:
         """Run one allowlisted executable synchronously under bounded local policy."""
-        return await execution.run_process(
+        _audit_event(
+            audit,
+            "process.run",
+            "attempt",
             project_id=project_id,
-            executable=executable,
-            args=args,
-            cwd=cwd,
-            timeout_seconds=timeout_seconds,
+            details={
+                "argument_count": len(args or []),
+                "timeout_overridden": timeout_seconds is not None,
+            },
+            strict=True,
         )
+        try:
+            result = await execution.run_process(
+                project_id=project_id,
+                executable=executable,
+                args=args,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception:
+            _audit_event(audit, "process.run", "error", project_id=project_id)
+            raise
+        _audit_event(
+            audit,
+            "process.run",
+            "success",
+            project_id=project_id,
+            details={
+                "exit_code": result["exit_code"],
+                "termination_reason": result["termination_reason"],
+                "output_truncated": result["output_truncated"],
+            },
+        )
+        return result
 
     @server.tool()
     async def start_job(
@@ -169,18 +269,47 @@ def create_mcp_server(
         timeout_seconds: int | None = None,
     ) -> JobStartResult:
         """Start an allowlisted process in the background and return an opaque job ID."""
-        return await jobs.start_job(
+        _audit_event(
+            audit,
+            "job.start",
+            "attempt",
             project_id=project_id,
-            executable=executable,
-            args=args,
-            cwd=cwd,
-            timeout_seconds=timeout_seconds,
+            details={
+                "argument_count": len(args or []),
+                "timeout_overridden": timeout_seconds is not None,
+            },
+            strict=True,
         )
+        try:
+            result = await jobs.start_job(
+                project_id=project_id,
+                executable=executable,
+                args=args,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception:
+            _audit_event(audit, "job.start", "error", project_id=project_id)
+            raise
+        _audit_event(
+            audit,
+            "job.start",
+            "success",
+            project_id=project_id,
+            details={"status": result["job"]["status"]},
+        )
+        return result
 
     @server.tool()
     def get_job(job_id: str) -> JobSummary:
         """Return safe metadata for one managed background job."""
-        return jobs.get_job(job_id)
+        try:
+            result = jobs.get_job(job_id)
+        except Exception:
+            _audit_event(audit, "job.get", "error")
+            raise
+        _audit_event(audit, "job.get", "success", project_id=result["project_id"])
+        return result
 
     @server.tool()
     def list_jobs(
@@ -188,7 +317,19 @@ def create_mcp_server(
         limit: int = DEFAULT_LIST_LIMIT,
     ) -> JobListResult:
         """List recent managed jobs without raw argv or host paths."""
-        return jobs.list_jobs(project_id=project_id, limit=limit)
+        try:
+            result = jobs.list_jobs(project_id=project_id, limit=limit)
+        except Exception:
+            _audit_event(audit, "job.list", "error", project_id=project_id)
+            raise
+        _audit_event(
+            audit,
+            "job.list",
+            "success",
+            project_id=project_id,
+            details={"returned_jobs": len(result["jobs"]), "requested_limit": limit},
+        )
+        return result
 
     @server.tool()
     def get_job_output(
@@ -199,32 +340,108 @@ def create_mcp_server(
     ) -> JobOutputResult:
         """Read one bounded page of sanitized stdout or stderr for a managed job."""
         if stream not in ("stdout", "stderr"):
+            _audit_event(audit, "job.output", "denied")
             raise ValueError("stream must be either 'stdout' or 'stderr'.")
-        return jobs.get_job_output(
-            job_id=job_id,
-            stream=stream,
-            offset=offset,
-            max_chars=max_chars,
+        try:
+            result = jobs.get_job_output(
+                job_id=job_id,
+                stream=stream,
+                offset=offset,
+                max_chars=max_chars,
+            )
+        except Exception:
+            _audit_event(audit, "job.output", "error")
+            raise
+        _audit_event(
+            audit,
+            "job.output",
+            "success",
+            details={
+                "stream": stream,
+                "requested_max_chars": max_chars,
+                "complete": result["complete"],
+            },
         )
+        return result
 
     @server.tool()
     async def cancel_job(job_id: str) -> JobCancelResult:
         """Cancel a supervised running job."""
-        return await jobs.cancel_job(job_id)
+        _audit_event(audit, "job.cancel", "attempt", strict=True)
+        try:
+            result = await jobs.cancel_job(job_id)
+        except Exception:
+            _audit_event(audit, "job.cancel", "error")
+            raise
+        _audit_event(
+            audit,
+            "job.cancel",
+            "success",
+            details={"accepted": result["accepted"], "status": result["status"]},
+        )
+        return result
 
     @server.tool()
     async def git_status(project_id: str) -> GitStatusResult:
         """Return path-free status and ahead/behind metadata for an authorized repository."""
-        return await git.git_status(project_id)
+        try:
+            result = await git.git_status(project_id)
+        except Exception:
+            _audit_event(audit, "git.status", "error", project_id=project_id)
+            raise
+        _audit_event(
+            audit,
+            "git.status",
+            "success",
+            project_id=project_id,
+            details={
+                "clean": result["clean"],
+                "ahead": result["ahead"],
+                "behind": result["behind"],
+            },
+        )
+        return result
 
     @server.tool()
     async def git_fetch(project_id: str) -> GitFetchResult:
         """Fetch only the configured branch from the trusted local HTTPS remote."""
-        return await git.git_fetch(project_id)
+        _audit_event(audit, "git.fetch", "attempt", project_id=project_id, strict=True)
+        try:
+            result = await git.git_fetch(project_id)
+        except Exception:
+            _audit_event(audit, "git.fetch", "error", project_id=project_id)
+            raise
+        _audit_event(
+            audit,
+            "git.fetch",
+            "success",
+            project_id=project_id,
+            details={"changed": result["changed"]},
+        )
+        return result
 
     @server.tool()
     async def git_sync_fast_forward(project_id: str) -> GitSyncResult:
         """Fast-forward a clean checked-out branch to the verified fetched head."""
-        return await git.git_sync_fast_forward(project_id)
+        _audit_event(
+            audit,
+            "git.sync_fast_forward",
+            "attempt",
+            project_id=project_id,
+            strict=True,
+        )
+        try:
+            result = await git.git_sync_fast_forward(project_id)
+        except Exception:
+            _audit_event(audit, "git.sync_fast_forward", "error", project_id=project_id)
+            raise
+        _audit_event(
+            audit,
+            "git.sync_fast_forward",
+            "success",
+            project_id=project_id,
+            details={"updated": result["updated"]},
+        )
+        return result
 
     return server
