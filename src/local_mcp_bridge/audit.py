@@ -16,9 +16,10 @@ import os
 import stat
 import threading
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping, TypeAlias
+from typing import TypeAlias
 
 from typing_extensions import TypedDict
 
@@ -117,9 +118,12 @@ def _validate_details(details: AuditDetails | None) -> dict[str, AuditScalar]:
             if safe_key not in _ALLOWED_INTEGER_DETAILS:
                 raise AuditError("Audit detail is not part of the fixed metadata schema.")
             validated[safe_key] = None
-        elif safe_key in _ALLOWED_INTEGER_DETAILS and type(value) is int:
-            validated[safe_key] = value
-        elif safe_key in _ALLOWED_BOOLEAN_DETAILS and isinstance(value, bool):
+        elif (
+            safe_key in _ALLOWED_INTEGER_DETAILS
+            and type(value) is int
+            or safe_key in _ALLOWED_BOOLEAN_DETAILS
+            and isinstance(value, bool)
+        ):
             validated[safe_key] = value
         elif safe_key in _ALLOWED_ENUM_DETAILS and isinstance(value, str):
             if value not in _ALLOWED_ENUM_DETAILS[safe_key]:
