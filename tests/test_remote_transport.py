@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx2
 import pytest
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
 
 from local_mcp_bridge.remote_config import RemoteSettings
 from local_mcp_bridge.remote_transport import BearerAuthMiddleware, create_remote_app, serve_remote
@@ -67,7 +69,7 @@ def test_bearer_middleware_rejects_missing_wrong_and_duplicate_headers() -> None
     asyncio.run(scenario())
 
 
-def test_valid_bearer_is_constant_shape_and_scrubbed_before_downstream() -> None:
+def test_valid_bearer_is_scrubbed_before_downstream() -> None:
     async def scenario() -> None:
         seen_headers: list[tuple[bytes, bytes]] = []
 
@@ -92,6 +94,31 @@ def test_valid_bearer_is_constant_shape_and_scrubbed_before_downstream() -> None
         lowered = {key.lower() for key, _ in seen_headers}
         assert b"authorization" not in lowered
         assert b"proxy-authorization" not in lowered
+
+    asyncio.run(scenario())
+
+
+def test_authenticated_streamable_http_round_trip_reaches_mcp_tool() -> None:
+    async def scenario() -> None:
+        server = create_mcp_server()
+        app = create_remote_app(server, _settings(), TOKEN)
+        transport = httpx2.ASGITransport(app=app)
+        url = "https://mcp.example.com/mcp"
+
+        async with (
+            server.session_manager.run(),
+            httpx2.AsyncClient(
+                transport=transport,
+                base_url=url,
+                headers={"Authorization": "Bearer " + TOKEN},
+            ) as http_client,
+            Client(streamable_http_client(url, http_client=http_client)) as client,
+        ):
+            result = await client.call_tool("health_check", {})
+
+        assert result.is_error is False
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "ok"
 
     asyncio.run(scenario())
 
