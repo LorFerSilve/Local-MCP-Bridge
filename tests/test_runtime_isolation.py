@@ -1,4 +1,4 @@
-"""Regression tests for runtime-config isolation."""
+"""Regression tests for runtime-config and runtime-state isolation."""
 
 import os
 import subprocess
@@ -6,10 +6,14 @@ import sys
 from pathlib import Path
 
 
-def test_server_import_ignores_invalid_local_runtime_config(tmp_path: Path) -> None:
-    """Importing the pure server factory must never read machine-local config."""
+def test_server_import_ignores_invalid_local_runtime_config_and_audit_state(
+    tmp_path: Path,
+) -> None:
+    """Importing the pure server factory must never read machine-local runtime state."""
     env = os.environ.copy()
     env["LOCAL_MCP_BRIDGE_CONFIG"] = str(tmp_path / "definitely-missing-config.yaml")
+    env["LOCAL_MCP_BRIDGE_AUDIT_DIR"] = "relative/audit/path"
+    env["LOCAL_MCP_BRIDGE_JOB_STATE_DIR"] = "relative/job/path"
 
     result = subprocess.run(
         [
