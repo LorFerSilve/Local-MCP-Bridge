@@ -1,4 +1,4 @@
-"""MCP contract tests for the Phase 7 public tool surface."""
+"""MCP contract tests for the Phase 8 public tool surface."""
 
 import asyncio
 from pathlib import Path
@@ -22,7 +22,7 @@ def _registry(root: Path) -> ProjectRegistry:
     )
 
 
-def test_server_exposes_exact_phase_7_tools() -> None:
+def test_server_exposes_exact_phase_8_tools() -> None:
     async def scenario() -> None:
         async with Client(create_mcp_server(), raise_exceptions=True) as client:
             result = await client.list_tools()
@@ -48,11 +48,12 @@ def test_server_exposes_exact_phase_7_tools() -> None:
             assert "git_push" not in names
             assert "git_reset" not in names
             assert "git_checkout" not in names
+            assert "read_audit_log" not in names
 
     asyncio.run(scenario())
 
 
-def test_health_check_reports_phase_7_capabilities(tmp_path: Path) -> None:
+def test_health_check_reports_phase_8_capabilities(tmp_path: Path) -> None:
     async def scenario() -> None:
         async with Client(create_mcp_server(_registry(tmp_path)), raise_exceptions=True) as client:
             result = await client.call_tool("health_check", {})
@@ -67,6 +68,8 @@ def test_health_check_reports_phase_7_capabilities(tmp_path: Path) -> None:
                 "jobs_enabled": True,
                 "persistent_jobs": False,
                 "git_enabled": True,
+                "audit_enabled": False,
+                "audit_healthy": True,
             }
             assert str(tmp_path) not in str(result.structured_content)
 
