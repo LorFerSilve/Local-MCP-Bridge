@@ -23,19 +23,19 @@ Phase 10 first proved the public HTTPS/tunnel/MCP path with the repository probe
 
 ### Phase 11 — Real project integration and autonomous workflow testing
 
-**Status: next / unblocked.**
+**Status: in progress.**
 
-Phase 11 may now begin because the real Claude connector has successfully completed OAuth authentication and read-only end-to-end MCP calls against an authorized local project.
+Phase 11 is active because the real Claude connector has successfully completed OAuth authentication and read-only end-to-end MCP calls against an authorized local project.
 
-Recommended progression:
+Progression:
 
-1. **11.1 — Controlled real-project onboarding:** authorize one selected project and begin with read/search only.
-2. **11.2 — Controlled execution enablement:** enable execution only for that project and validate bounded allowlisted commands.
-3. **11.3 — Persistent job workflow:** validate job start, polling, bounded output, cancellation, and restart behavior.
-4. **11.4 — Read-only Git state validation:** configure the trusted Git overlay and validate `git_status`.
-5. **11.5 — Constrained Git synchronization:** validate trusted fetch and clean fast-forward synchronization.
-6. **11.6 — End-to-end development loop:** exercise a bounded workflow using only explicitly authorized capabilities.
-7. **11.7 — Phase 11 closeout:** record live evidence, residual risks, and any new blockers.
+1. **11.1 — Controlled real-project onboarding:** **in progress**. Repository-side onboarding validation is implemented; one selected local project must still pass the operator check and real Claude read/search smoke test. See [`phase-11-1-controlled-onboarding.md`](phase-11-1-controlled-onboarding.md).
+2. **11.2 — Controlled execution enablement:** blocked on 11.1 completion.
+3. **11.3 — Persistent job workflow:** blocked on 11.2 completion.
+4. **11.4 — Read-only Git state validation:** blocked on the earlier Phase 11 gates.
+5. **11.5 — Constrained Git synchronization:** blocked on 11.4 completion.
+6. **11.6 — End-to-end development loop:** blocked on the preceding capability validations.
+7. **11.7 — Phase 11 closeout:** final live evidence and residual-risk review.
 
 ## Phase 11 entry invariants
 
