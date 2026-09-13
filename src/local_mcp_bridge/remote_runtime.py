@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from local_mcp_bridge.oauth import (
     AUTH_MODE_OAUTH,
-    PreconfiguredOAuthProvider,
     build_oauth_auth_settings,
     install_oauth_consent_route,
     load_oauth_client_credentials,
     load_remote_auth_mode,
 )
+from local_mcp_bridge.oauth_consent import RetrySafeOAuthProvider
 from local_mcp_bridge.remote_config import load_remote_token, load_runtime_remote_settings
 from local_mcp_bridge.remote_transport import serve_remote
 from local_mcp_bridge.runtime_composition import create_runtime_composition
@@ -27,7 +27,7 @@ def main() -> None:
 
     if auth_mode == AUTH_MODE_OAUTH:
         client_id, client_secret = load_oauth_client_credentials()
-        provider = PreconfiguredOAuthProvider(
+        provider = RetrySafeOAuthProvider(
             public_origin=settings.public_origin,
             resource_url=settings.public_url,
             client_id=client_id,
