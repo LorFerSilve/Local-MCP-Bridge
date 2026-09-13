@@ -106,8 +106,14 @@ def load_oauth_client_credentials() -> tuple[str, str]:
             f"{OAUTH_CLIENT_SECRET_ENV_VAR} must contain between "
             f"{MIN_OAUTH_CLIENT_SECRET_CHARS} and {MAX_OAUTH_CLIENT_SECRET_CHARS} characters."
         )
-    if _TOKEN_PATTERN.fullmatch(client_id) is None or _TOKEN_PATTERN.fullmatch(client_secret) is None:
-        raise RemoteConfigError("OAuth client credentials must use URL-safe visible token characters.")
+    credentials_are_unsafe = (
+        _TOKEN_PATTERN.fullmatch(client_id) is None
+        or _TOKEN_PATTERN.fullmatch(client_secret) is None
+    )
+    if credentials_are_unsafe:
+        raise RemoteConfigError(
+            "OAuth client credentials must use URL-safe visible token characters."
+        )
     return client_id, client_secret
 
 
