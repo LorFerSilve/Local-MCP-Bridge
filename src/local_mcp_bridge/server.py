@@ -1,6 +1,13 @@
 """Pure MCP server factory for Local-MCP-Bridge."""
 
 from mcp.server import MCPServer
+from mcp.server.auth.provider import (
+    AccessToken,
+    AuthorizationCode,
+    OAuthAuthorizationServerProvider,
+    RefreshToken,
+)
+from mcp.server.auth.settings import AuthSettings
 from typing_extensions import TypedDict
 
 from local_mcp_bridge import __version__
@@ -34,6 +41,7 @@ from local_mcp_bridge.tools.git_service import (
 )
 
 SERVER_NAME = "Local MCP Bridge"
+OAuthProvider = OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]
 
 
 class HealthStatus(TypedDict):
@@ -103,12 +111,16 @@ def create_mcp_server(
     job_manager: JobManager | None = None,
     git_service: GitService | None = None,
     audit_logger: AuditLogger | None = None,
+    auth_settings: AuthSettings | None = None,
+    auth_server_provider: OAuthProvider | None = None,
 ) -> MCPServer:
     """Create a bridge server bound to explicitly supplied runtime services.
 
     This factory intentionally avoids machine-local config and persistent state.
     The real runtime module supplies the Git-enabled registry, disk-backed jobs, and
     persistent audit logger; tests can inject in-memory services or leave auditing off.
+    OAuth is also explicit input so importing or reusing this factory never opts a caller
+    into a network-facing authentication mode.
     """
     active_registry = registry if registry is not None else ProjectRegistry.empty()
     filesystem = FilesystemService(active_registry, filesystem_limits)
@@ -119,7 +131,11 @@ def create_mcp_server(
     jobs = job_manager or JobManager(active_registry, execution)
     git = git_service or GitService(active_registry)
     audit = audit_logger or AuditLogger()
-    server = MCPServer(SERVER_NAME)
+    server = MCPServer(
+        SERVER_NAME,
+        auth=auth_settings,
+        auth_server_provider=auth_server_provider,
+    )
 
     @server.tool()
     def health_check() -> HealthStatus:
