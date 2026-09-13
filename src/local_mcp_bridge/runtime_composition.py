@@ -13,6 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mcp.server import MCPServer
+from mcp.server.auth.provider import (
+    AccessToken,
+    AuthorizationCode,
+    OAuthAuthorizationServerProvider,
+    RefreshToken,
+)
+from mcp.server.auth.settings import AuthSettings
 
 from local_mcp_bridge.audit import AuditLogger
 from local_mcp_bridge.config import load_runtime_registry
@@ -26,6 +33,7 @@ JOB_STATE_ENV_VAR = "LOCAL_MCP_BRIDGE_JOB_STATE_DIR"
 AUDIT_DIR_ENV_VAR = "LOCAL_MCP_BRIDGE_AUDIT_DIR"
 DEFAULT_JOB_STATE_DIR = Path("runtime/jobs")
 DEFAULT_AUDIT_DIR = Path("runtime/audit")
+OAuthProvider = OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,8 +65,12 @@ def audit_dir() -> Path:
     return _runtime_directory(AUDIT_DIR_ENV_VAR, DEFAULT_AUDIT_DIR)
 
 
-def create_runtime_composition() -> RuntimeComposition:
-    """Create all configured services once, with identical policy for every transport."""
+def create_runtime_composition(
+    *,
+    auth_settings: AuthSettings | None = None,
+    auth_server_provider: OAuthProvider | None = None,
+) -> RuntimeComposition:
+    """Create configured services once, with identical project policy for every transport."""
     registry = load_runtime_git_registry(load_runtime_registry())
     audit = AuditLogger(audit_dir())
     audit.record(
@@ -74,6 +86,8 @@ def create_runtime_composition() -> RuntimeComposition:
         execution_service=execution,
         job_manager=jobs,
         audit_logger=audit,
+        auth_settings=auth_settings,
+        auth_server_provider=auth_server_provider,
     )
     audit.record(
         "runtime.bootstrap",
