@@ -119,6 +119,7 @@ async def probe_remote_endpoint(settings: RemoteSettings, token: str) -> ClaudeP
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout,
             follow_redirects=False,
+            trust_env=False,
         ) as http_client,
         Client(
             streamable_http_client(
