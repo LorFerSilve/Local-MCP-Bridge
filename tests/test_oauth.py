@@ -203,15 +203,17 @@ def test_oauth_authorization_code_flow_reaches_mcp_and_rotates_refresh_token() -
             assert tokens["token_type"] == "Bearer"
             assert access_token != CLIENT_SECRET
 
-            async with httpx2.AsyncClient(
-                transport=transport,
-                base_url=RESOURCE_URL,
-                headers={"Authorization": f"Bearer {access_token}"},
-            ) as authenticated_http:
-                async with Client(
+            async with (
+                httpx2.AsyncClient(
+                    transport=transport,
+                    base_url=RESOURCE_URL,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                ) as authenticated_http,
+                Client(
                     streamable_http_client(RESOURCE_URL, http_client=authenticated_http)
-                ) as mcp_client:
-                    result = await mcp_client.call_tool("health_check", {})
+                ) as mcp_client,
+            ):
+                result = await mcp_client.call_tool("health_check", {})
             assert result.is_error is False
             assert result.structured_content is not None
             assert result.structured_content["status"] == "ok"
