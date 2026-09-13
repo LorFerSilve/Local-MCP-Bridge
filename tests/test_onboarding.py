@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 
 from local_mcp_bridge.onboarding import evaluate_onboarding, main
-from local_mcp_bridge.registry import ProjectPermissions, ProjectRecord, ProjectRegistry
+from local_mcp_bridge.registry import (
+    GitSettings,
+    ProjectPermissions,
+    ProjectRecord,
+    ProjectRegistry,
+)
 
 
 def _registry(
@@ -17,6 +22,15 @@ def _registry(
     execute: bool = False,
     git: bool = False,
 ) -> ProjectRegistry:
+    git_settings = (
+        GitSettings(
+            remote="origin",
+            branch="main",
+            remote_url="https://example.com/owner/repo.git",
+        )
+        if git
+        else None
+    )
     return ProjectRegistry(
         [
             ProjectRecord(
@@ -28,6 +42,7 @@ def _registry(
                     execute=execute,
                     git=git,
                 ),
+                git=git_settings,
             )
         ]
     )
@@ -54,22 +69,11 @@ def test_execution_enabled_project_is_not_ready(tmp_path: Path) -> None:
 
 
 def test_git_enabled_project_is_not_ready(tmp_path: Path) -> None:
-    registry = ProjectRegistry(
-        [
-            ProjectRecord(
-                project_id="real-project",
-                root=tmp_path.resolve(),
-                permissions=ProjectPermissions(read=True, search=True, git=False),
-            )
-        ]
-    )
-    public = registry.get_public("real-project")
-    assert public is not None
-    public["permissions"]["git"] = True
+    report = evaluate_onboarding(_registry(tmp_path, git=True), "real-project")
 
-    # Public metadata is a copy: mutating it must not alter the registry's effective policy.
-    report = evaluate_onboarding(registry, "real-project")
-    assert report.ok is True
+    assert report.ok is False
+    assert report.reason == "permissions_not_read_search_only"
+    assert report.git is True
 
 
 def test_missing_project_returns_sanitized_failure(tmp_path: Path) -> None:
