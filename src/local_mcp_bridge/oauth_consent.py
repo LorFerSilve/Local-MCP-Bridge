@@ -19,11 +19,13 @@ from starlette.responses import HTMLResponse, PlainTextResponse, RedirectRespons
 from local_mcp_bridge.oauth import MAX_CONSENT_FORM_BYTES, PreconfiguredOAuthProvider
 
 CONSENT_RETRY_TTL_SECONDS = 60
+CLAUDE_CALLBACK_ORIGIN = "https://claude.ai"
 
 _CONSENT_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": (
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
+        "default-src 'none'; style-src 'unsafe-inline'; "
+        f"form-action 'self' {CLAUDE_CALLBACK_ORIGIN}; "
         "base-uri 'none'; frame-ancestors 'none'"
     ),
     "Referrer-Policy": "no-referrer",
