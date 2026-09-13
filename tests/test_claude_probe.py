@@ -100,7 +100,9 @@ def test_validate_mcp_client_rejects_missing_unexpected_and_degraded_surface() -
     assert report.health_status == "degraded"
     assert report.unexpected_tool_count == 1
     assert "list_projects" in report.missing_tools
-    assert "unexpected_tool" not in json.dumps(report.as_public_dict())
+    public = report.as_public_dict()
+    assert public["unexpected_tool_count"] == 1
+    assert "unexpected_tool" not in public["missing_tools"]
 
 
 def test_probe_cli_fails_closed_without_remote_policy(
