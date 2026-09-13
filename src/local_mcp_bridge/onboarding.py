@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from local_mcp_bridge.config import ConfigError, load_runtime_registry
 from local_mcp_bridge.git_config import GitConfigError, load_runtime_git_registry
