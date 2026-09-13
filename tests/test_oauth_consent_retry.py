@@ -96,6 +96,10 @@ def test_consent_request_id_survives_body_loss_and_duplicate_submit() -> None:
             consent = await client.get(consent_url)
             assert consent.status_code == 200
             assert f"/oauth/consent?request={request_id}" in consent.text
+            assert (
+                "form-action 'self' https://claude.ai"
+                in consent.headers["content-security-policy"]
+            )
 
             first = await client.post(
                 consent_url,
