@@ -1,11 +1,10 @@
-"""Authenticated loopback-only Streamable HTTP hosting for Phase 9.
+"""Authenticated loopback-only Streamable HTTP hosting for remote MCP.
 
 The bridge deliberately does not open a public socket and does not launch a tunnel
 provider. A separate trusted tunnel/reverse-proxy process terminates public HTTPS and
-forwards to this loopback listener. The bridge still enforces its own pre-shared bearer
-secret, Host allowlist, Origin allowlist, body limit, legacy-session limits, and HTTP
-concurrency ceiling; tunnel authentication may be added in front but never replaces these
-local checks.
+forwards to this loopback listener. Remote authentication is explicit: the Phase 9
+pre-shared bearer gate remains the default, while Phase 10.5 can delegate authentication
+to the MCP SDK's OAuth authorization/resource-server middleware.
 """
 
 from __future__ import annotations
@@ -115,9 +114,24 @@ def _require_loopback(settings: RemoteSettings) -> None:
         raise RuntimeError("Remote transport may bind only to an explicit loopback address.")
 
 
-def create_remote_app(server: MCPServer, settings: RemoteSettings, token: str) -> ASGIApp:
-    """Build the bearer-gated Streamable HTTP ASGI application without binding a socket."""
+def create_remote_app(
+    server: MCPServer,
+    settings: RemoteSettings,
+    token: str | None = None,
+    *,
+    sdk_oauth: bool = False,
+) -> ASGIApp:
+    """Build a protected Streamable HTTP ASGI app without binding a socket.
+
+    ``sdk_oauth`` is an explicit opt-in. Without it the original pre-shared bearer token is
+    mandatory, preventing a missing token from accidentally producing an authless listener.
+    """
     _require_loopback(settings)
+    if sdk_oauth and token is not None:
+        raise RuntimeError("OAuth mode may not also install the pre-shared bearer wrapper.")
+    if not sdk_oauth and token is None:
+        raise RuntimeError("Pre-shared bearer mode requires an explicit token.")
+
     transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=list(settings.allowed_hosts),
@@ -132,19 +146,22 @@ def create_remote_app(server: MCPServer, settings: RemoteSettings, token: str) -
         max_sessions=settings.max_sessions,
         transport_security=transport_security,
     )
+    if sdk_oauth:
+        return mcp_app
+    assert token is not None
     return BearerAuthMiddleware(mcp_app, token)
 
 
-def serve_remote(server: MCPServer, settings: RemoteSettings, token: str) -> None:
-    """Serve the authenticated MCP app on loopback for an external HTTPS tunnel.
-
-    Uvicorn trusts forwarded scheme/address metadata only from the loopback peer expected to
-    be the local tunnel/reverse-proxy process. Access logging is disabled to keep transport
-    metadata out of routine logs; MCP/tool activity remains covered by the Phase 8 audit
-    layer.
-    """
+def serve_remote(
+    server: MCPServer,
+    settings: RemoteSettings,
+    token: str | None = None,
+    *,
+    sdk_oauth: bool = False,
+) -> None:
+    """Serve the protected MCP app on loopback for an external HTTPS tunnel."""
     _require_loopback(settings)
-    app = create_remote_app(server, settings, token)
+    app = create_remote_app(server, settings, token, sdk_oauth=sdk_oauth)
     uvicorn.run(
         app,
         host=settings.bind_host,

@@ -1,4 +1,4 @@
-"""Phase 9 authenticated Streamable HTTP boundary tests."""
+"""Authenticated Streamable HTTP boundary tests."""
 
 from __future__ import annotations
 
@@ -29,6 +29,16 @@ def _settings(*, max_request_body_bytes: int = 262_144) -> RemoteSettings:
         session_idle_timeout_seconds=300,
         max_sessions=32,
     )
+
+
+def test_remote_authentication_modes_fail_closed() -> None:
+    server = create_mcp_server()
+
+    with pytest.raises(RuntimeError, match="requires an explicit token"):
+        create_remote_app(server, _settings())
+
+    with pytest.raises(RuntimeError, match="may not also install"):
+        create_remote_app(server, _settings(), TOKEN, sdk_oauth=True)
 
 
 def test_bearer_middleware_rejects_missing_wrong_and_duplicate_headers() -> None:

@@ -1,7 +1,17 @@
-# Phase 9 remote/tunnel policy template only.
+# Phase 9/10.5 remote/tunnel policy template only.
 # Copy to config/remote.local.yaml for local use; that file is ignored by Git.
-# Never place the bearer token in YAML. It is read only from:
-#   LOCAL_MCP_BRIDGE_REMOTE_TOKEN
+# Authentication material is never stored in this YAML.
+#
+# The default remote auth mode remains the Phase 9 pre-shared bearer gate:
+#   LOCAL_MCP_BRIDGE_REMOTE_AUTH_MODE=pre_shared_bearer
+#   LOCAL_MCP_BRIDGE_REMOTE_TOKEN=<high-entropy local secret>
+#
+# Claude custom connectors can instead use the explicit Phase 10.5 OAuth mode:
+#   LOCAL_MCP_BRIDGE_REMOTE_AUTH_MODE=oauth
+#   LOCAL_MCP_BRIDGE_OAUTH_CLIENT_ID=<local client id>
+#   LOCAL_MCP_BRIDGE_OAUTH_CLIENT_SECRET=<high-entropy local client secret>
+#
+# Never commit real bearer tokens, OAuth client IDs, or OAuth client secrets.
 
 # Remote networking remains off unless this separate local overlay explicitly opts in.
 enabled: false
@@ -13,11 +23,12 @@ bind:
   port: 8765
 
 # Must be the stable HTTPS URL clients use, including the exact /mcp path.
-# The hostname is used to derive strict Host and Origin allowlists.
+# The hostname is used to derive strict Host and Origin allowlists and, in OAuth mode,
+# the public OAuth issuer/resource URLs.
 public_url: "https://mcp.example.com/mcp"
 
 limits:
-  # Request parsing is capped before MCP dispatch. Phase 9 allows at most 1 MiB.
+  # Request parsing is capped before MCP dispatch. Remote mode allows at most 1 MiB.
   max_request_body_bytes: 262144
 
   # These limits apply to legacy stateful Streamable HTTP sessions. Modern MCP
@@ -29,9 +40,13 @@ limits:
 # - bind.host can only be 127.0.0.1 or ::1; 0.0.0.0/LAN/public binds are rejected;
 # - public_url must use HTTPS, a DNS hostname, and exactly /mcp;
 # - URL credentials, query strings, fragments, localhost/IP public URLs are rejected;
-# - the bearer secret must be a high-entropy URL-safe token supplied by environment;
-# - every HTTP request requires exactly one Authorization: Bearer <token> header;
-# - the validated Authorization header is removed before MCP tool dispatch;
-# - DNS-rebinding Host/Origin checks stay enabled;
-# - request bodies, legacy sessions, listener concurrency, backlog, and keep-alive are bounded;
+# - authentication mode is explicit and defaults to pre_shared_bearer;
+# - pre_shared_bearer mode still requires exactly one validated bearer token per request;
+# - oauth mode requires a preconfigured confidential client from environment values;
+# - OAuth dynamic client registration is disabled;
+# - OAuth authorization codes/access tokens are short-lived and refresh tokens rotate;
+# - OAuth access tokens are bound to the configured /mcp resource;
+# - the Claude OAuth callback is fixed to https://claude.ai/api/mcp/auth_callback;
+# - DNS-rebinding Host/Origin checks stay enabled in both authentication modes;
+# - request bodies, sessions, listener concurrency, backlog, and keep-alive are bounded;
 # - no tunnel executable is launched by the bridge and no arbitrary tunnel command is accepted.
