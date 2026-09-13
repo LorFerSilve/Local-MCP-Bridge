@@ -1,0 +1,37 @@
+# Phase 9 remote/tunnel policy template only.
+# Copy to config/remote.local.yaml for local use; that file is ignored by Git.
+# Never place the bearer token in YAML. It is read only from:
+#   LOCAL_MCP_BRIDGE_REMOTE_TOKEN
+
+# Remote networking remains off unless this separate local overlay explicitly opts in.
+enabled: false
+
+# The bridge itself is intentionally loopback-only. A separately managed tunnel or
+# reverse proxy terminates public HTTPS and forwards to this local listener.
+bind:
+  host: "127.0.0.1"
+  port: 8765
+
+# Must be the stable HTTPS URL clients use, including the exact /mcp path.
+# The hostname is used to derive strict Host and Origin allowlists.
+public_url: "https://mcp.example.com/mcp"
+
+limits:
+  # Request parsing is capped before MCP dispatch. Phase 9 allows at most 1 MiB.
+  max_request_body_bytes: 262144
+
+  # These limits apply to legacy stateful Streamable HTTP sessions. Modern MCP
+  # 2026-07-28 HTTP requests are sessionless in the SDK.
+  session_idle_timeout_seconds: 300
+  max_sessions: 32
+
+# Security properties enforced by code:
+# - bind.host can only be 127.0.0.1 or ::1; 0.0.0.0/LAN/public binds are rejected;
+# - public_url must use HTTPS, a DNS hostname, and exactly /mcp;
+# - URL credentials, query strings, fragments, localhost/IP public URLs are rejected;
+# - the bearer secret must be a high-entropy URL-safe token supplied by environment;
+# - every HTTP request requires exactly one Authorization: Bearer <token> header;
+# - the validated Authorization header is removed before MCP tool dispatch;
+# - DNS-rebinding Host/Origin checks stay enabled;
+# - request bodies, legacy sessions, listener concurrency, backlog, and keep-alive are bounded;
+# - no tunnel executable is launched by the bridge and no arbitrary tunnel command is accepted.

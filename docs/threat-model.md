@@ -3,300 +3,302 @@
 ## Assets to protect
 
 - files outside explicitly authorized project roots;
-- credentials, tokens, private keys, cookies, environment secrets, and local authentication material;
+- credentials, bearer tokens, private keys, cookies, environment secrets, and local authentication material;
 - integrity of authorized repositories and the host operating system;
-- CPU, RAM, GPU, disk, and network availability;
+- CPU, RAM, GPU, disk, network, and bridge availability;
 - private benchmark/runtime/job data;
 - Git history, trusted remote policy, and local ignored/untracked data;
-- availability and integrity of the local Phase 8 audit trail;
-- separation between operational audit metadata and MCP/model context.
+- integrity/availability of the local audit trail;
+- the boundary between operational runtime state and MCP/model context;
+- the Phase 9 remote endpoint from unauthenticated or misrouted network access.
 
-## Threats and mitigations
+## Core local threats
 
 ### Prompt injection through repository, process, or fetched content
 
-**Scenario:** Source, documentation, generated files, logs, process output, recovered job output, or fetched repository content instructs the model to escape policy.
+**Scenario:** Source, documentation, generated files, process output, recovered job output, or fetched repository content instructs the model to escape policy.
 
-**Mitigation:** Content/output is data, not policy. Local project, permission, path, executable, argument, environment, timeout, output, persistence, Git, audit, and resource controls apply independently of model reasoning. Recovered output is sanitized again before exposure. Raw audit logs are not exposed as an MCP tool.
+**Mitigation:** Content is data, not policy. Project, path, executable, argument, environment, persistence, Git, audit, transport, and resource controls are deterministic local checks independent of model reasoning. Raw audit logs are not exposed as MCP context.
 
-### Lexical path traversal
+### Path traversal or redirection
 
-**Scenario:** A caller uses `..`, an absolute/UNC/drive path, ADS syntax, device names, or mixed separators to escape a project root.
+**Scenario:** A caller uses `..`, an absolute/UNC/drive path, device/ADS syntax, symlinks, Windows junctions/reparse points, nested mounts, or hard links to escape an authorized root.
 
-**Mitigation:** Filesystem callers and process/job working directories use project-relative paths only. Unsafe lexical forms are rejected before use and effective paths must resolve under the canonical project root.
+**Mitigation:** Project-relative lexical validation, non-following component inspection, canonical containment, redirection/mount rejection, protected hard-link rejection, and identity checks are applied before protected I/O. Process/job working directories reuse the same `PathGuard` boundary.
 
-### Symlink, junction, reparse, mount, or hard-link escape
+**Residual risk:** Application-level checks cannot eliminate every race against another process with equivalent or greater OS privileges.
 
-**Scenario:** A path component inside a project or local runtime-state path redirects to another location, or a hard-linked protected file aliases another file object.
+### Sensitive file disclosure
 
-**Mitigation:** `PathGuard` rejects symlinks, redirecting Windows reparse points/junctions, nested mounts, and hard-linked protected regular files. Job-state and Phase 8 audit-state paths have their own non-following component/file validation. Audit files must be single-link regular files.
+**Scenario:** An otherwise authorized tree contains `.env`, SSH/cloud credentials, private keys, Terraform state, or token/service-account files.
 
-### File replacement / TOCTOU
+**Mitigation:** Filesystem read/search tools apply a sensitive-path deny policy as defense in depth. Operators should keep real secrets outside authorized roots.
 
-**Scenario:** A local process replaces a checked project, job-state, executable, Git metadata, or audit file between authorization and use.
+**Residual risk:** Allowlisted child code is not constrained by the read-tool filter and can use normal OS APIs with the bridge account's privileges.
 
-**Mitigation:** Protected file reads capture non-following file identity, open, compare descriptor identity, and revalidate paths. Executables are rechecked immediately before process launch. Existing audit files are identity-checked around open, new audit files use exclusive creation, and `O_NOFOLLOW` is used where available. Git repository state is validated before operations and revalidated after fetch where mutation is possible.
+### Shell or arbitrary executable escape
 
-**Residual risk:** Application-level checks cannot eliminate every race against another process with equivalent or greater OS privileges. Local account/host isolation remains part of the security boundary.
+**Scenario:** Model-controlled input tries shell metacharacters, a shell executable, an arbitrary host executable path, or PATH substitution.
 
-### Secret exfiltration from an authorized root
+**Mitigation:** No generic shell command exists. Callers choose only configured executable aliases. Known shells are rejected; argv is passed directly to `asyncio.create_subprocess_exec`; unpinned lookup uses a constrained PATH; resolved targets are validated/rechecked immediately before launch.
 
-**Scenario:** The source tree contains `.env`, cloud/SSH credentials, keys, Terraform state, token files, or other secrets.
+**Residual risk:** An allowlisted interpreter/compiler/package manager/build tool is inherently programmable and remains a high-trust capability. Portable subprocess APIs also cannot provide a completely race-free descriptor-based cross-platform exec primitive.
 
-**Mitigation:** Read/search tools apply a defense-in-depth sensitive-path deny policy. Operators should still keep real secrets outside authorized roots.
+### Execution resource exhaustion
 
-**Residual execution risk:** Child processes are not subject to the read-tool sensitive-path filter. Trusted executable/project code can use ordinary OS APIs to read anything available to the bridge account.
+**Scenario:** Child code hangs, emits unlimited output, waits for input, or the client starts too many tasks.
 
-### Shell command injection
+**Mitigation:** stdin is disabled; argv, timeout, captured output, per-project execution concurrency, and global managed-job inventory are bounded.
 
-**Scenario:** Model-controlled arguments contain `;`, `&&`, pipes, redirects, quotes, or other shell syntax intended to execute additional commands.
+**Residual risk:** Child code can still spawn descendants/threads, use GPU/network/disk, or otherwise consume resources beyond these application-level counters.
 
-**Mitigation:** There is no `shell(command)` primitive. `run_process` and `start_job` use an executable alias plus argv and launch with `asyncio.create_subprocess_exec`. Known shell executables are rejected. Ordinary shell metacharacters remain argument data.
+### Process output exfiltration or prompt injection
 
-**Residual risk:** An allowlisted programmable executable can evaluate code or spawn other processes. That is an explicit high-trust execution grant, not shell confinement.
+**Scenario:** A child emits control sequences, huge output, prompt injection, or sensitive host data.
 
-### Arbitrary executable selection or PATH substitution
+**Mitigation:** Capture is byte-bounded before decode; unsupported control characters are escaped; direct configured-root strings are redacted; recovered output is re-sanitized.
 
-**Scenario:** A caller supplies an arbitrary host executable path, or an allowlisted command name resolves to attacker-controlled code earlier in PATH.
+**Residual risk:** Generic redaction cannot recognize arbitrary encoding/obfuscation of host secrets.
 
-**Mitigation:** MCP callers supply only aliases. Pinned absolute targets can only be defined in local configuration. Unpinned lookup uses a constrained PATH excluding empty/relative, redirecting, unavailable, and project-root entries. The resolved target is validated and identity is rechecked immediately before launch.
+## Persistent-job threats
 
-**Residual risk:** Portable subprocess APIs do not provide a fully descriptor-based cross-platform exec primitive. A concurrently privileged local actor may still win the final replacement race.
+### State tampering, startup exhaustion, or stale authorization
 
-### Working-directory escape
+**Scenario:** Local state is malformed/oversized, forged, or refers to projects/executables whose authorization was later revoked.
 
-**Scenario:** A process/job starts outside its project through absolute path, traversal, symlink, mount, or junction.
+**Mitigation:** Recovery bounds file count/size/total bytes/output, rejects unsafe file/link types and invalid schema, and reauthorizes project, execute permission, executable alias, relative cwd, status, timestamps, and sizes against current policy.
 
-**Mitigation:** `cwd` is normalized as project-relative and authorized through `PathGuard` before process creation and before a managed job ID is allocated.
+### Raw argument persistence
 
-**Residual risk:** The launch directory is not a child-process sandbox. Once running, the process can change directory and open paths available to the bridge OS user.
+**Scenario:** A command argument contains a password, token, signed URL, or private path and is written to durable job state.
 
-### Environment-secret inheritance
+**Mitigation:** Raw argv is never persisted; only bounded metadata such as argument count is retained.
 
-**Scenario:** The bridge process has API keys/tokens in environment variables and an executed tool inherits or prints them.
+### PID reuse after restart
 
-**Mitigation:** Child execution receives a deliberately small environment plus constrained PATH. Arbitrary MCP environment overrides are not supported.
+**Scenario:** A persisted PID is reused by another OS process and the bridge later attaches to or kills it.
 
-**Residual risk:** Secrets available through files, credential agents, local services, key stores, or other host mechanisms remain accessible to sufficiently privileged child code.
+**Mitigation:** PIDs are not persisted/reused. Nonterminal recovered jobs are marked `interrupted`.
 
-### Process output injection or exfiltration
+### Descendants survive termination
 
-**Scenario:** A child emits ANSI/control sequences, prompt injection, huge output, or sensitive host data.
+**Scenario:** A child starts descendants that outlive timeout/cancellation or bridge failure.
 
-**Mitigation:** Capture is byte-bounded before decoding. Unsupported control characters are escaped and direct occurrences of the configured project-root string are redacted. Recovered output is sanitized/redacted again.
+**Mitigation:** POSIX uses a new session/process group. Windows terminates the direct child.
 
-**Residual risk:** A malicious child can encode or transform sensitive information in ways generic redaction cannot recognize. Persisted output can therefore still be sensitive local data.
+**Residual risk:** Portable Python does not guarantee recursive Windows descendant termination, and a force-killed bridge can leave OS children behind.
 
-### Process-output, runtime, or concurrency exhaustion
+## Git threats
 
-**Scenario:** A child emits indefinitely, hangs waiting for input, or the caller starts too many expensive tasks.
+### Arbitrary/destructive Git operation
 
-**Mitigation:** Output capture, runtime, argv, per-project execution concurrency, and global managed-job count are bounded. stdin is `DEVNULL`. Excess work fails rather than building an unbounded queue.
+**Scenario:** An agent pushes, resets, cleans, rebases, changes branch, supplies arbitrary URLs/refspecs/argv, force-updates history, or deletes refs.
 
-**Residual risk:** Child code can spawn descendants, threads, GPU work, network traffic, or disk-heavy workloads. Application-level counts are not OS resource quotas.
+**Mitigation:** The dedicated API exposes only path-free status, fixed trusted fetch, and clean fast-forward synchronization. Caller-controlled Git argv/URL/refspec and history-rewrite operations are absent.
 
-### Job-state disk or startup exhaustion
+### Generic execution bypasses Git policy
 
-**Scenario:** A state directory contains huge numbers of files, large records, or malformed records intended to consume startup time/memory.
+**Scenario:** Generic process execution exposes `git` as a second unrestricted path around the dedicated service.
 
-**Mitigation:** Recovery caps directory entries examined, per-file size, retained-history count, total candidate bytes attempted, and recovered-output size. Malformed records are ignored rather than trusted.
+**Mitigation:** Runtime policy rejects a direct `git`/`git.exe` generic executable rule where the dedicated Git boundary is active.
 
-### Persisted-state tampering and stale authorization
+**Residual risk:** A separately allowlisted interpreter/program can itself invoke Git; generic execution is already a high-trust capability.
 
-**Scenario:** A local actor edits a `.job.json` record to forge status/output/path information, or authorization is revoked while historical state remains.
+### Repository-local Git config executes or redirects
 
-**Mitigation:** Persisted state is untrusted. Recovery verifies file/link behavior, identity, schema, IDs, current project authorization, executable alias, cwd syntax, timestamps/status/sizes, output types, and optional fields. Recovered text is sanitized/root-redacted again. Revoked projects/executables are not re-admitted.
+**Scenario:** Malicious local configuration enables hooks, aliases, credential helpers, filters, includes, URL rewrites, submodules, external merge/diff helpers, alternate object stores, or transport redirection.
 
-### Secret persistence through argv
+**Mitigation:** Repository layout and high-risk configuration namespaces are validated/rejected. System/global configuration and interactive helpers are disabled for bridge Git invocations. Transport is HTTPS-only and the configured repository remote must exactly match local trusted policy.
 
-**Scenario:** A command argument contains a token, password, signed URL, private path, or other secret and is written into durable job state.
+### Dirty/divergent synchronization destroys work
 
-**Mitigation:** Raw argv is never persisted. Only argument count is retained. Live argv exists only for the supervised task that needs it.
+**Scenario:** Automated synchronization overwrites local changes/ignored data or rewinds/merges local history.
 
-### Guessing or manipulating job IDs
+**Mitigation:** Sync requires the configured checked-out branch and zero staged/unstaged/untracked changes; rechecks after fetch; proves local `HEAD` is an ancestor of the fetched target; uses `--ff-only --no-overwrite-ignore`; verifies final `HEAD` exactly equals the fetched target.
 
-**Scenario:** A caller uses malformed IDs or guesses IDs to probe job inventory.
+### Remote/repository changes during sync
 
-**Mitigation:** Jobs use opaque UUID-derived 128-bit IDs and malformed/unknown IDs receive a generic failure. IDs are not the authorization boundary.
+**Scenario:** The remote or another local process changes state mid-operation.
 
-### Bridge restart while a job is active / PID reuse
+**Mitigation:** One fetched object ID is treated as the operation target; repository/branch/cleanliness are revalidated; final HEAD is verified. Git operations are serialized per project within one bridge process.
 
-**Scenario:** The bridge restarts with durable state saying a process was active, or attempts to reattach to a reused PID.
-
-**Mitigation:** Recovered nonterminal states become `interrupted` with a restart reason. PIDs are not persisted/reused for reattachment.
-
-**Residual risk:** If the bridge itself crashes or is forcibly killed, an OS child may survive as an orphan depending on platform/process topology.
-
-### Descendant process survives cancellation or timeout
-
-**Scenario:** A child launches descendants that outlive cancellation/timeout.
-
-**Mitigation:** POSIX launches use a new session and process-group termination. Windows kills the direct child and uses a new process group.
-
-**Residual risk:** Portable Python APIs do not guarantee recursive Windows descendant termination. Phase 8 does not claim Windows Job Object or kernel-level process-tree containment.
-
-### Process mutates project/host state
-
-**Scenario:** An allowlisted program modifies source, deletes files, installs packages, changes config, or writes elsewhere on the host.
-
-**Mitigation:** Execution is denied by default and requires explicit per-project permission plus executable allowlist. The configured Phase 8 runtime also requires a durable audit-attempt record before execution begins.
-
-**Residual risk:** This is inherent to application-level execution. Allowed executable/project code has the OS privileges of the bridge account.
-
-### Runtime state is accidentally published
-
-**Scenario:** Persisted job output or audit records contain private operational data and are committed to the public repository.
-
-**Mitigation:** `runtime/`, `jobs/`, logs, outputs, local config, credentials, Git-policy overlays, and related state are ignored by Git and prohibited by repository security policy. Security-baseline CI checks common sensitive tracked paths.
-
-### Arbitrary or destructive Git operation
-
-**Scenario:** An agent resets, cleans, rebases, force-pushes, deletes refs, supplies arbitrary URLs/refspecs, or rewrites history.
-
-**Mitigation:** The Git surface exposes only `git_status`, `git_fetch`, and `git_sync_fast_forward`. There is no generic Git argv surface, push, reset, clean, checkout/switch, rebase, cherry-pick, force operation, arbitrary URL/refspec, or history-rewrite primitive.
-
-### Generic process execution bypasses Git policy
-
-**Scenario:** A project has `execute: true` and an MCP caller invokes an allowlisted generic `git` executable to escape the dedicated API.
-
-**Mitigation:** Runtime policy rejects a project configuration that exposes `git`/`git.exe` through generic process execution while the dedicated Git boundary is in use.
-
-**Residual risk:** An allowlisted interpreter or other trusted executable can itself invoke Git. Generic execution is already a high-trust capability and not an OS sandbox.
-
-### Git remote redirection or credential injection
-
-**Scenario:** Repository-local config rewrites the trusted URL, invokes a credential helper, changes transport behavior, or causes Git to contact a different endpoint.
-
-**Mitigation:** Remote URL/branch/name come from a separate ignored local policy overlay. URLs are HTTPS-only without embedded credentials/query/fragment and must exactly match the configured repository remote. System/global config, interactive prompting, credential helpers, AskPass, and non-HTTPS protocols are disabled. Dangerous repository-local config namespaces are rejected.
-
-### Repository-local Git config executes code
-
-**Scenario:** A malicious repository configures hooks, filters, external helpers, aliases, or includes so status/fetch/sync executes commands.
-
-**Mitigation:** Repository-local config is validated before exposed Git operations; fixed command-line hardening is applied; hooks and interactive helpers are disabled; only fixed shell-free Git argv shapes are invoked.
-
-**Residual risk:** Git itself remains complex native software. The bridge does not sandbox a compromised Git binary or unknown parser vulnerability.
-
-### Git metadata redirection or alternate object store
-
-**Scenario:** `.git`, critical metadata, refs, alternates, or common-directory indirection redirect Git outside the authorized repository.
-
-**Mitigation:** `.git` must be a real directory; critical metadata/ref components are validated; unsafe redirection/hard-link forms and external object alternates/common-directory indirection are rejected; `git rev-parse --show-toplevel` must exactly match the authorized root.
-
-### Dirty worktree or ignored local data loss
-
-**Scenario:** Synchronization overwrites staged/unstaged/untracked work or an ignored local file that becomes tracked remotely.
-
-**Mitigation:** Sync requires staged, unstaged, and untracked counts all zero before fetch and rechecks after fetch. `merge --ff-only --no-overwrite-ignore` refuses obstructing ignored local files. The bridge does not auto-stash/reset/clean.
-
-### Divergent or local-ahead Git history
-
-**Scenario:** Local history contains commits not in the remote and an automated sync rewinds or merges them.
-
-**Mitigation:** The bridge proves `HEAD` is an ancestor of the fetched remote head. Divergence/local-ahead states fail closed. No reset, rebase, merge commit, or force operation is attempted.
-
-### Remote/repository changes during synchronization
-
-**Scenario:** The remote or another local process changes state while synchronization is in progress.
-
-**Mitigation:** The fetched object ID is treated as the target for the current operation; repository/config/branch/cleanliness are revalidated after fetch; ancestry is proved; final HEAD must equal the fetched target. Per-project Git operations inside one bridge are serialized.
-
-**Residual risk:** Locks are process-local. Another bridge instance or same-privilege local process can still race state.
+**Residual risk:** Another bridge instance or same-privilege local process can still race application-level checks.
 
 ### Fetched code later executes
 
-**Scenario:** A trusted configured remote is compromised or intentionally contains malicious code; a fast-forward imports it and a later execution request runs it.
+**Scenario:** A compromised trusted remote delivers malicious code that is later executed locally.
 
-**Mitigation:** Git synchronization and execution remain separate capabilities. Execution still requires `execute: true`, an executable allowlist, and Phase 8 pre-operation audit availability.
+**Mitigation:** Git synchronization and execution are separate capabilities; execution still requires explicit permission/alias and the audit precondition.
 
-**Residual risk:** Enabling both synchronization and execution is a trust decision. A trusted remote policy is not a code-safety proof.
+**Residual risk:** Enabling both capabilities is a deliberate trust decision, not a code-safety proof.
 
-### Git network or output resource exhaustion
+## Audit threats
 
-**Scenario:** A remote stalls, emits excessive diagnostics, or triggers expensive Git work.
+### Sensitive data accidentally enters audit records
 
-**Mitigation:** Git operations have bounded timeout and combined stdout/stderr capture, and only one bridge-managed Git operation per project is active at a time.
+**Scenario:** Logging captures argv, output, search text, paths/content, remote URLs, credentials, environment values, transport headers, or arbitrary exceptions.
 
-**Residual risk:** Application-level limits do not cap every network byte, disk write, CPU cycle, or allocation inside Git.
+**Mitigation:** The audit logger accepts a fixed allowlisted metadata schema rather than a general string dictionary. Raw sensitive/request-derived text has no generic field.
 
-## Phase 8 audit-specific threats
+### Audit redirection, hard-link abuse, or tampering
 
-### Sensitive data accidentally enters the audit log
+**Scenario:** A local actor places a symlink/junction/reparse/hard-linked object at the audit path or replaces a checked file.
 
-**Scenario:** Generic logging records raw argv, a search query, file path/content, child output, Git URL, credential, environment value, or exception string.
+**Mitigation:** Audit directories are inspected component-by-component; files must be regular/non-redirecting/single-link; first creation is exclusive; existing-file identity is checked around open; `O_NOFOLLOW` is used where available.
 
-**Mitigation:** `AuditLogger` uses a fixed schema rather than accepting an arbitrary logging dictionary. Detail keys are allowlisted and accept only bounded integers/booleans/`null` or a few fixed enums. Project IDs must satisfy the registry grammar. There is no general caller-controlled string, argv, output, query, path, URL, credential, or error field.
-
-**Residual risk:** Project IDs and coarse operation metadata are intentionally retained and may themselves be operationally sensitive. Audit state therefore remains local-only and Git-ignored.
-
-### Audit path redirection or hard-link abuse
-
-**Scenario:** A local actor places a symlink/junction/reparse point or hard-linked file at the audit path so the bridge appends to an unintended target.
-
-**Mitigation:** Audit directories are walked/created component-by-component and reject redirecting components. Existing active/archive files must be regular, non-redirecting, single-link files. New active files are exclusively created; existing files are identity-checked around open; `O_NOFOLLOW` is used where available.
-
-**Residual risk:** A same-privilege local process can still race application-level checks on platforms without stronger kernel handle/path guarantees.
+**Residual risk:** Local audit is not tamper-proof against a same/higher-privilege OS actor. There is no remote trusted sink or cryptographic signing key.
 
 ### Audit disk exhaustion
 
-**Scenario:** Repeated MCP activity grows logs without bound and fills local storage.
+**Scenario:** Repeated activity grows audit data without bound.
 
-**Mitigation:** Events and detail counts are bounded. The active audit file rotates at a configured ceiling; retained file count is bounded. Defaults are 4 MiB active file and five total files; hard maxima are 64 MiB and 16 files.
+**Mitigation:** Event size/detail count, active-file size, and retained-file count are bounded with rotation.
 
-**Residual risk:** Rotation controls bridge-owned audit growth, not overall host disk use by executed code, Git, or unrelated processes.
+### Audit failure silently allows high-impact effects
 
-### Audit failure silently bypasses accountability
+**Scenario:** Disk/permission/tampering failure prevents logging while execution or Git mutation continues.
 
-**Scenario:** Disk failure, permissions, tampering, or an unsafe audit object prevents recording while the bridge continues executing code or mutating Git state.
+**Mitigation:** `run_process`, `start_job`, `cancel_job`, `git_fetch`, and `git_sync_fast_forward` require a successfully persisted `attempt` event before effect in the configured runtime. A failed completion write marks audit unhealthy; the next high-impact attempt again fails closed.
 
-**Mitigation:** In the configured runtime, `run_process`, `start_job`, `cancel_job`, `git_fetch`, and `git_sync_fast_forward` require a successful persistent `attempt` event **before** their underlying service is invoked. An unavailable audit sink therefore refuses those operations.
+### Audit failure corrupts safe read semantics
 
-For already-completed effects, completion audit is non-transactional. A completion-write failure marks the logger unhealthy rather than falsely reporting that the prior OS/Git effect did not happen. The next high-impact attempt must again pass the strict audit gate.
+**Scenario:** A read succeeds but completion logging fails and the caller is falsely told the read failed.
 
-### Audit failure turns safe reads into misleading failures
+**Mitigation:** Read-only completion logging is non-strict. The operation result remains accurate and health becomes degraded.
 
-**Scenario:** A read/search/status operation succeeds but its audit completion write fails, and the caller is told the underlying read itself failed.
+### Raw audit becomes model context
 
-**Mitigation:** Read-only/inspection completion logging is non-strict. The tool result remains accurate while audit health becomes degraded. `health_check()` exposes `audit_healthy=false`.
+**Scenario:** Locally modified audit records become a prompt-injection channel.
 
-### Raw audit log becomes prompt-injection/model context
+**Mitigation:** No raw audit-reader MCP tool exists. Only audit enabled/healthy health metadata is exposed.
 
-**Scenario:** Audit records or locally modified audit files are exposed through MCP and become instructions/data for the model.
+## Phase 9 remote/tunnel threats
 
-**Mitigation:** Phase 8 adds no `read_audit_log` tool. Raw audit state is operational local state, not an AI context source. Health exposes only non-sensitive audit enabled/healthy booleans.
+### Accidental public bind
 
-### Local audit tampering or deletion
+**Scenario:** A config mistake binds the Python server to `0.0.0.0`, a LAN address, or a public interface, bypassing the intended tunnel boundary.
 
-**Scenario:** A local administrator or same-privilege actor edits/deletes audit records to hide activity.
+**Mitigation:** Remote policy accepts only `127.0.0.1` or `::1`. The transport layer independently enforces the same invariant before constructing/serving the app. Public reachability must arrive through a separate HTTPS tunnel/reverse proxy.
 
-**Mitigation:** File/path validation reduces accidental and model-driven redirection/tampering surfaces, but Phase 8 intentionally does not claim tamper-proof forensics.
+### Remote exposure enabled unintentionally
 
-**Residual risk:** There is no cryptographic signing key, append-only kernel primitive, remote trusted log sink, or protection from a same/higher-privilege host actor. Local audit is operational accountability, not non-repudiation.
+**Scenario:** Authorizing projects in the normal base config unexpectedly opens a network service.
 
-### Runtime startup with unsafe audit state
+**Mitigation:** Stdio remains the default runtime. Remote networking uses a separate command plus separate ignored remote overlay with explicit `enabled: true`. Importing the remote module is side-effect free.
 
-**Scenario:** The configured audit directory override is relative, redirecting, non-directory, or contains an unsafe existing active log.
+### Unauthenticated internet client reaches MCP
 
-**Mitigation:** Explicit audit overrides must be absolute. `AuditLogger` validates/prepares the local path before the configured server is returned. Unsafe persistent audit state fails configured runtime startup rather than silently downgrading to no audit.
+**Scenario:** A public caller discovers the endpoint and directly invokes MCP tools.
 
-### Pure server tests accidentally depend on machine-local audit state
+**Mitigation:** Every HTTP request must contain exactly one valid bridge-owned bearer token before MCP dispatch. Missing, malformed, duplicate, or wrong credentials receive a generic `401`.
 
-**Scenario:** Importing/reusing the server factory reads `LOCAL_MCP_BRIDGE_AUDIT_DIR` or writes `runtime/audit`, making tests nondeterministic and machine configuration security-relevant to unit imports.
+### Bearer-token guessing
 
-**Mitigation:** Persistent audit wiring lives only in `runtime.py`. `create_mcp_server()` defaults to a disabled in-memory `AuditLogger`. Regression tests set deliberately invalid local runtime/audit/job environment values and verify that importing the pure server factory remains successful.
+**Scenario:** An attacker brute-forces the remote credential online.
 
-### Public MCP exposure / compromised remote session
+**Mitigation:** The token must be 43–256 URL-safe ASCII characters and operators are instructed to generate cryptographically random material. Comparison is constant-time.
 
-**Scenario:** An unauthenticated endpoint or compromised AI session sends malicious requests.
+**Residual risk:** Provider/network rate limiting remains useful for volumetric abuse even though high-entropy online guessing is impractical.
 
-**Mitigation:** Phase 8 remains local stdio. Phase 9 remote integration must require authenticated encrypted transport and must preserve all local project/path/execution/job/Git/audit gates. Authentication will not replace capability authorization.
+### Bearer-token leakage
 
-## Residual Phase 8 risk
+**Scenario:** The remote secret is committed, stored in YAML/URL/query strings, reflected into MCP context, written into audit/access logs, or forwarded downstream as a normal request header.
 
-Phases 5 through 8 materially constrain orchestration but do not provide a container, VM, seccomp profile, Windows Job Object sandbox, filesystem namespace, network sandbox, OS-level CPU/RAM/GPU quota, or tamper-proof remote audit service.
+**Mitigation:** The secret is accepted only from `LOCAL_MCP_BRIDGE_REMOTE_TOKEN`; remote YAML has no secret field; the public URL rejects credentials/query/fragment; Uvicorn access logging is disabled; successful auth scrubs both `Authorization` and `Proxy-Authorization` before MCP dispatch; audit schema has no header/token field.
 
-Git remains complex native software processing untrusted repository/network data. Allowlisted project code runs with the bridge account's privileges. A local actor with equivalent OS privileges can race or alter local state, another bridge instance can operate concurrently, and a compromised trusted remote can deliver malicious project content.
+**Residual risk:** Environment variables are process-local configuration, not a hardware-backed secret store. A same/higher-privilege local actor may still inspect process state. Suspected exposure requires token rotation/restart.
 
-Phase 8 adds bounded metadata-only operational auditing and fail-closed pre-audit gates for high-impact actions, but it intentionally does not record enough caller data for full request replay and cannot prevent a privileged local actor from deleting local audit records.
+### Stolen valid bearer token
 
-Direct filesystem write/delete/rename tools remain intentionally separate. Phase 9 is the remote/tunnel integration boundary and must preserve the Phase 8 local security model.
+**Scenario:** An attacker obtains the current token and sends valid authenticated MCP requests.
+
+**Mitigation:** Existing project/tool/path/execution/Git/audit authorization still applies behind the transport gate. The token grants endpoint reachability, not arbitrary host capability.
+
+**Residual risk:** Until rotation/restart, the attacker has the same transport reachability as the intended bearer holder. Phase 9 has no per-user identities/scopes/revocation list.
+
+### Plaintext public transport / TLS downgrade
+
+**Scenario:** A client reaches Local-MCP-Bridge over public plaintext HTTP or an operator treats the loopback HTTP listener as a LAN/public service.
+
+**Mitigation:** Public policy requires an HTTPS client-facing URL while the bridge socket itself remains loopback-only. TLS termination is delegated to the separately managed ingress. Non-loopback plaintext deployment is unsupported.
+
+### DNS rebinding / malicious Host or Origin
+
+**Scenario:** Browser/network behavior routes a request to loopback while presenting an attacker-controlled Host/Origin.
+
+**Mitigation:** MCP SDK DNS-rebinding protection stays enabled with public/local Host/Origin allowlists. Invalid values are rejected before normal MCP dispatch.
+
+### Malicious forwarded headers
+
+**Scenario:** A remote client spoofs `X-Forwarded-*` metadata to influence scheme/address interpretation.
+
+**Mitigation:** Uvicorn trusts forwarded metadata only from the configured loopback peer expected to be the tunnel/reverse proxy.
+
+**Residual risk:** A malicious same-privilege local process can connect from loopback and spoof proxy metadata. Host compromise is outside Phase 9 containment claims.
+
+### Tunnel/reverse-proxy compromise
+
+**Scenario:** The ingress provider is compromised or misconfigured and forwards arbitrary traffic, observes post-TLS requests, or changes headers.
+
+**Mitigation:** The bridge bearer gate remains independent of provider authentication and is required after the tunnel hop. Tunnel authentication is defense in depth, not a replacement for Local-MCP-Bridge authorization.
+
+**Residual risk:** The ingress is part of the transport trust chain and can observe/modify traffic after TLS termination. If it also gains the bearer secret, the bridge cannot distinguish it from the authorized bearer holder.
+
+### Tunnel provider credentials committed or executed by the bridge
+
+**Scenario:** Cloudflare/ngrok/SSH credentials enter the public repo, or model input controls a tunnel executable/command.
+
+**Mitigation:** Phase 9 is provider-agnostic and contains no tunnel-management tool or subprocess path. Provider credentials/configuration remain external local operational state. Repository hygiene rejects common secret/local state patterns.
+
+### Network request/session exhaustion
+
+**Scenario:** Authenticated or unauthenticated traffic sends huge bodies, opens excessive sessions/connections, or holds keep-alive resources.
+
+**Mitigation:** Authentication blocks normal MCP work for invalid clients; MCP request bodies are capped; legacy session idle lifetime/count are bounded; Uvicorn concurrency/backlog are capped at 64 and keep-alive at 5 seconds.
+
+**Residual risk:** Traffic can consume upstream tunnel/provider/bandwidth resources before bridge-level controls apply. Provider-side DDoS/rate limiting remains outside the bridge.
+
+### Authentication failures create durable disk churn
+
+**Scenario:** Internet scanners repeatedly send bad tokens and force a persistent audit write per request until disk is exhausted or logs become noisy.
+
+**Mitigation:** Bearer failures are handled before MCP dispatch and deliberately are not written to the Phase 8 persistent audit JSONL. Authenticated MCP tool activity retains the ordinary audit policy.
+
+### Remote transport bypasses Phase 0–8 authorization
+
+**Scenario:** The HTTP entry point constructs a new server with permissive defaults and skips project/Git/job/audit configuration.
+
+**Mitigation:** Stdio and remote use the same `runtime_composition.py` path and inject the same registry, execution service, persistent job manager, and audit logger into the same `create_mcp_server(...)` factory.
+
+### OAuth-only client incompatibility
+
+**Scenario:** A target MCP client requires standards-based OAuth discovery/consent and cannot attach the Phase 9 static bearer header.
+
+**Mitigation:** This is treated as a compatibility failure, not a reason to weaken authentication. Phase 10 validates the intended target client. If OAuth is mandatory, it requires a separate reviewed standards-based auth integration.
+
+## Runtime state publication
+
+### Local state is accidentally committed
+
+**Scenario:** Job state, audit logs, bearer secrets, remote/tunnel policy, or private output enters the public repository.
+
+**Mitigation:** Runtime/job/log/output directories, `.env`, local overlays including `config/*.local.yaml`, credential/token files, and similar state are ignored by Git. Security-baseline CI rejects common tracked sensitive paths and obvious private keys. Operators must still review diffs before publication.
+
+If a secret is committed, later deletion is insufficient: rotate/revoke it immediately and purge history where appropriate.
+
+## Residual Phase 9 risk
+
+Phases 5–9 materially constrain model-driven orchestration but do not provide a VM/container, seccomp profile, Windows Job Object sandbox, filesystem namespace, network sandbox, provider firewall, or OS-level CPU/RAM/GPU quota.
+
+The most important remaining risks are:
+
+- same/higher-privilege local actors can race/tamper with process and runtime state;
+- executable project code can use the bridge account's OS/network privileges;
+- Git remains a complex native parser of repository/network data;
+- audit files are local operational evidence, not non-repudiable records;
+- a stolen Phase 9 bearer token provides endpoint reachability until rotation;
+- the HTTPS tunnel/reverse proxy is part of the transport trust chain;
+- volumetric traffic may consume resources upstream of bridge limits;
+- Phase 9's simple bearer model may not satisfy clients that mandate OAuth.
+
+Remote authentication never replaces local capability authorization. Direct filesystem write/delete/rename MCP tools remain intentionally absent and require a separate security design before introduction.

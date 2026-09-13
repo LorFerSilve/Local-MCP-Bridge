@@ -1,7 +1,9 @@
 # Example base configuration only. Copy to config/config.yaml for local use.
 # The real config is ignored by Git and must never be committed.
 
-# Reserved for the later HTTP/tunnel transport phase. Phase 8 still uses stdio.
+# Reserved base fields; Phase 9 network exposure does NOT use these values.
+# Remote/tunnel policy lives separately in config/remote.local.yaml so enabling
+# project access can never implicitly enable a network listener.
 server:
   host: "127.0.0.1"
   port: 8000
@@ -47,11 +49,18 @@ projects:
 # provide arbitrary Git argv, URLs, refs, pushes, resets, cleans, checkouts, rebases,
 # force operations, or history rewrites.
 #
-# Phase 8 local audit state is configured by runtime wiring rather than this YAML:
+# Local audit state is configured by runtime wiring rather than this YAML:
 # - default audit directory: runtime/audit/
 # - optional absolute override: LOCAL_MCP_BRIDGE_AUDIT_DIR
 # - raw argv/output/query/path/content/credential text is not part of the audit schema
 # - high-impact configured-runtime actions require a successful pre-operation audit write
+#
+# Phase 9 remote transport is also a separate local policy:
+#   Copy-Item config/remote.example.yaml config/remote.local.yaml
+#
+# Remote mode requires enabled: true in that ignored overlay plus the memory-only
+# LOCAL_MCP_BRIDGE_REMOTE_TOKEN environment variable. The listener is loopback-only;
+# a separately managed HTTPS tunnel/reverse proxy supplies public reachability.
 #
 # Base policy remains fail-closed:
 # - Project IDs address canonical local roots; roots may not overlap.
@@ -63,3 +72,4 @@ projects:
 # - Generic Git execution is rejected when process execution is enabled.
 # - If config/config.yaml is absent, the bridge starts with zero projects.
 # - If the Git overlay is absent, dedicated Git synchronization stays disabled.
+# - Base project configuration alone never enables Phase 9 network exposure.
