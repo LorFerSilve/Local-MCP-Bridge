@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-mcp-bridge"
-version = "0.10.3"
+version = "0.11.0"
 description = "A security-scoped MCP bridge for controlled local development access."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,6 +36,7 @@ dev = [
 local-mcp-bridge = "local_mcp_bridge.runtime:main"
 local-mcp-bridge-remote = "local_mcp_bridge.remote_runtime:main"
 local-mcp-bridge-claude-probe = "local_mcp_bridge.claude_probe:main"
+local-mcp-bridge-onboarding-check = "local_mcp_bridge.onboarding:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
