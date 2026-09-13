@@ -7,7 +7,8 @@ access tokens, rotating refresh tokens, and process-local token state.
 
 from __future__ import annotations
 
-import hmac
+import os
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
     AuthorizationParams,
+    AuthorizeError,
     OAuthAuthorizationServerProvider,
     RefreshToken,
     TokenError,
@@ -30,14 +32,26 @@ from pydantic import AnyHttpUrl, AnyUrl
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
+from local_mcp_bridge.remote_config import RemoteConfigError
+
 OAUTH_SCOPE = "mcp"
 CLAUDE_CALLBACK_URL = "https://claude.ai/api/mcp/auth_callback"
+AUTH_MODE_PRE_SHARED_BEARER = "pre_shared_bearer"
+AUTH_MODE_OAUTH = "oauth"
+REMOTE_AUTH_MODE_ENV_VAR = "LOCAL_MCP_BRIDGE_REMOTE_AUTH_MODE"
+OAUTH_CLIENT_ID_ENV_VAR = "LOCAL_MCP_BRIDGE_OAUTH_CLIENT_ID"
+OAUTH_CLIENT_SECRET_ENV_VAR = "LOCAL_MCP_BRIDGE_OAUTH_CLIENT_SECRET"
 AUTHORIZATION_CODE_TTL_SECONDS = 300
 ACCESS_TOKEN_TTL_SECONDS = 3600
 REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 PENDING_AUTHORIZATION_TTL_SECONDS = 300
 MAX_PENDING_AUTHORIZATIONS = 128
 MAX_CONSENT_FORM_BYTES = 8192
+MIN_OAUTH_CLIENT_ID_CHARS = 16
+MAX_OAUTH_CLIENT_ID_CHARS = 128
+MIN_OAUTH_CLIENT_SECRET_CHARS = 43
+MAX_OAUTH_CLIENT_SECRET_CHARS = 256
+_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~-]+")
 
 _CONSENT_HEADERS = {
     "Cache-Control": "no-store",
@@ -56,6 +70,45 @@ class _PendingAuthorization:
     client_id: str
     params: AuthorizationParams
     expires_at: float
+
+
+def load_remote_auth_mode() -> str:
+    """Return the explicitly selected remote authentication mode.
+
+    The existing pre-shared bearer gate remains the default. OAuth therefore cannot become
+    active merely because client credentials happen to exist in the environment.
+    """
+    mode = os.getenv(REMOTE_AUTH_MODE_ENV_VAR, AUTH_MODE_PRE_SHARED_BEARER)
+    if mode not in {AUTH_MODE_PRE_SHARED_BEARER, AUTH_MODE_OAUTH}:
+        raise RemoteConfigError(
+            f"{REMOTE_AUTH_MODE_ENV_VAR} must be '{AUTH_MODE_PRE_SHARED_BEARER}' or "
+            f"'{AUTH_MODE_OAUTH}'."
+        )
+    return mode
+
+
+def load_oauth_client_credentials() -> tuple[str, str]:
+    """Load the single preconfigured OAuth client from process-local environment values."""
+    client_id = os.getenv(OAUTH_CLIENT_ID_ENV_VAR)
+    client_secret = os.getenv(OAUTH_CLIENT_SECRET_ENV_VAR)
+    if client_id is None or client_secret is None:
+        raise RemoteConfigError(
+            f"{OAUTH_CLIENT_ID_ENV_VAR} and {OAUTH_CLIENT_SECRET_ENV_VAR} must both be set "
+            "for OAuth remote transport."
+        )
+    if not MIN_OAUTH_CLIENT_ID_CHARS <= len(client_id) <= MAX_OAUTH_CLIENT_ID_CHARS:
+        raise RemoteConfigError(
+            f"{OAUTH_CLIENT_ID_ENV_VAR} must contain between {MIN_OAUTH_CLIENT_ID_CHARS} "
+            f"and {MAX_OAUTH_CLIENT_ID_CHARS} characters."
+        )
+    if not MIN_OAUTH_CLIENT_SECRET_CHARS <= len(client_secret) <= MAX_OAUTH_CLIENT_SECRET_CHARS:
+        raise RemoteConfigError(
+            f"{OAUTH_CLIENT_SECRET_ENV_VAR} must contain between "
+            f"{MIN_OAUTH_CLIENT_SECRET_CHARS} and {MAX_OAUTH_CLIENT_SECRET_CHARS} characters."
+        )
+    if _TOKEN_PATTERN.fullmatch(client_id) is None or _TOKEN_PATTERN.fullmatch(client_secret) is None:
+        raise RemoteConfigError("OAuth client credentials must use URL-safe visible token characters.")
+    return client_id, client_secret
 
 
 class PreconfiguredOAuthProvider(
@@ -116,14 +169,15 @@ class PreconfiguredOAuthProvider(
             if value.expires_at is not None and value.expires_at < now
         ]
         for token in expired_access:
-            self._revoke_access(token)
+            refresh = self._access_to_refresh.pop(token, None)
+            self._access_tokens.pop(token, None)
+            if refresh is not None:
+                self._refresh_to_access.pop(refresh, None)
         for token in expired_refresh:
             self._revoke_refresh(token)
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        if hmac.compare_digest(client_id, self._client.client_id):
-            return self._client
-        return None
+        return self._client if client_id == self._client.client_id else None
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         raise NotImplementedError("Dynamic client registration is disabled.")
@@ -135,11 +189,11 @@ class PreconfiguredOAuthProvider(
     ) -> str:
         self._prune()
         if client.client_id != self._client.client_id:
-            raise TokenError(error="invalid_client")
+            raise AuthorizeError(error="unauthorized_client")
         if params.resource is not None and params.resource != self._resource_url:
-            raise TokenError(error="invalid_target")
+            raise AuthorizeError(error="invalid_target")
         if len(self._pending) >= MAX_PENDING_AUTHORIZATIONS:
-            raise TokenError(error="invalid_request")
+            raise AuthorizeError(error="temporarily_unavailable")
 
         request_id = secrets.token_urlsafe(32)
         self._pending[request_id] = _PendingAuthorization(
@@ -332,19 +386,25 @@ class PreconfiguredOAuthProvider(
 
         content_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
         if content_type != "application/x-www-form-urlencoded":
-            return PlainTextResponse("Unsupported form encoding.", status_code=415, headers=_CONSENT_HEADERS)
+            return PlainTextResponse(
+                "Unsupported form encoding.", status_code=415, headers=_CONSENT_HEADERS
+            )
 
         chunks: list[bytes] = []
         size = 0
         async for chunk in request.stream():
             size += len(chunk)
             if size > MAX_CONSENT_FORM_BYTES:
-                return PlainTextResponse("Authorization form is too large.", status_code=413, headers=_CONSENT_HEADERS)
+                return PlainTextResponse(
+                    "Authorization form is too large.", status_code=413, headers=_CONSENT_HEADERS
+                )
             chunks.append(chunk)
         try:
             fields = parse_qs(b"".join(chunks).decode("utf-8"), keep_blank_values=True)
         except UnicodeError:
-            return PlainTextResponse("Invalid authorization form.", status_code=400, headers=_CONSENT_HEADERS)
+            return PlainTextResponse(
+                "Invalid authorization form.", status_code=400, headers=_CONSENT_HEADERS
+            )
 
         request_id = fields.get("request", [""])[0]
         decision = fields.get("decision", [""])[0]
@@ -354,9 +414,16 @@ class PreconfiguredOAuthProvider(
                 status_code=400,
                 headers=_CONSENT_HEADERS,
             )
-        target = self._approve(request_id) if decision == "allow" else self._deny(request_id) if decision == "deny" else None
+        if decision == "allow":
+            target = self._approve(request_id)
+        elif decision == "deny":
+            target = self._deny(request_id)
+        else:
+            target = None
         if target is None:
-            return PlainTextResponse("Invalid authorization decision.", status_code=400, headers=_CONSENT_HEADERS)
+            return PlainTextResponse(
+                "Invalid authorization decision.", status_code=400, headers=_CONSENT_HEADERS
+            )
         return RedirectResponse(target, status_code=302, headers=_CONSENT_HEADERS)
 
 
